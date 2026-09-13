@@ -14,6 +14,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 
+from selftr.identity import canonical_frame_fusion_mode
 from vggt_omega.models.adaptive_pair_scope_attention import (
     adaptive_pair_scope_attention_block,
 )
@@ -26,7 +27,7 @@ from vggt_omega.models.progressive_attention import (
     progressive_config_from_dict,
     resolve_progressive_schedule,
 )
-from vggt_omega.models.um_triton import fused_um_edge_cost
+from vggt_omega.models.selftr_triton import fused_selftr_edge_cost
 from vggt_omega.utils.reference_frame import resolve_first_frame_token_indices
 
 
@@ -325,7 +326,7 @@ class Aggregator(nn.Module):
         if frame_fusion_recompute_layers is None:
             frame_fusion_recompute_layers = (
                 (0, 10, 17)
-                if str(frame_fusion_mode).replace("_", "-").lower() == "u-m"
+                if canonical_frame_fusion_mode(frame_fusion_mode) == "selftr"
                 else ()
             )
         self.frame_fusion_recompute_layers = self._normalize_frame_fusion_recompute_layers(
@@ -452,7 +453,7 @@ class Aggregator(nn.Module):
     def _normalize_frame_fusion_recompute_layers(
         layers: tuple[int, ...] | list[int] | str | int,
     ) -> tuple[int, ...]:
-        """Normalize optional layer indices used for U-M plan refreshes."""
+        """Normalize optional layer indices used for SelfTR plan refreshes."""
         if isinstance(layers, str):
             normalized = layers.strip().lower()
             if not normalized or normalized == "none":
@@ -755,7 +756,9 @@ class Aggregator(nn.Module):
         layer_lambdas: tuple[float, ...] | list[float] | dict[int, float] | str | None = None,
         spatial_radius: int = 1,
     ) -> None:
-        mode = mode.replace("_", "-")
+        # ``u-m`` is intentionally accepted as a deprecated command-line
+        # alias, while all internal state and output metadata use ``selftr``.
+        mode = canonical_frame_fusion_mode(mode)
         valid_modes = {
             "none",
             "dp-medoid",
@@ -768,7 +771,7 @@ class Aggregator(nn.Module):
             "adaptive-spatial-representative",
             "h-m",
             "h-r",
-            "u-m",
+            "selftr",
             "u-r",
         }
         if mode not in valid_modes:
@@ -825,7 +828,7 @@ class Aggregator(nn.Module):
         recompute_each_global = bool(recompute_each_global)
         if recompute_layers is not None:
             recompute_layers = self._normalize_frame_fusion_recompute_layers(recompute_layers)
-        elif mode == "u-m":
+        elif mode == "selftr":
             recompute_layers = (0, 10, 17)
         else:
             recompute_layers = getattr(self, "frame_fusion_recompute_layers", ())
@@ -975,7 +978,7 @@ class Aggregator(nn.Module):
                 )
             if recompute_layers:
                 raise ValueError("layer-specific recomputation is only supported for spatiotemporal representative fusion")
-        elif mode in {"h-m", "h-r", "u-m", "u-r"}:
+        elif mode in {"h-m", "h-r", "selftr", "u-r"}:
             num_groups = None
             if self._merge_is_enabled(self.global_merging, self.merging, self.merge_ratio):
                 raise ValueError(
@@ -1508,11 +1511,11 @@ class Aggregator(nn.Module):
             and self.frame_fusion_recompute_each_global
         )
         recompute_spatiotemporal_layers = (
-            self.frame_fusion_mode in {"h-m", "h-r", "u-m", "u-r"}
+            self.frame_fusion_mode in {"h-m", "h-r", "selftr", "u-r"}
             and bool(self.frame_fusion_recompute_layers)
         )
         recompute_spatiotemporal_each_global = (
-            self.frame_fusion_mode in {"h-m", "h-r", "u-m", "u-r"}
+            self.frame_fusion_mode in {"h-m", "h-r", "selftr", "u-r"}
             and self.frame_fusion_recompute_each_global
         )
         if self.frame_fusion_mode == "dp-medoid" and self.frame_fusion_start_layer == -1:
@@ -1560,7 +1563,7 @@ class Aggregator(nn.Module):
                 source_layer=-1,
             )
         elif (
-            self.frame_fusion_mode in {"h-m", "h-r", "u-m", "u-r"}
+            self.frame_fusion_mode in {"h-m", "h-r", "selftr", "u-r"}
             and self.frame_fusion_start_layer == -1
             and not recompute_spatiotemporal_layers
             and not recompute_spatiotemporal_each_global
@@ -1648,7 +1651,7 @@ class Aggregator(nn.Module):
                 )
                 current_spatial_plans = spatial_representative_plans
             elif (
-                self.frame_fusion_mode in {"h-m", "h-r", "u-m", "u-r"}
+                self.frame_fusion_mode in {"h-m", "h-r", "selftr", "u-r"}
                 and spatiotemporal_representative_plans is None
                 and self.frame_fusion_start_layer == block_idx
             ):
@@ -1788,7 +1791,7 @@ class Aggregator(nn.Module):
             if self.frame_fusion_recompute_each_global and self.frame_fusion_mode in {
                 "h-m",
                 "h-r",
-                "u-m",
+                "selftr",
                 "u-r",
             }:
                 self.last_frame_fusion_debug["recompute_each_global"] = True
@@ -2576,7 +2579,7 @@ class Aggregator(nn.Module):
             return cache[cache_key]
 
         if use_spatiotemporal_cube:
-            # U-M's cube is controlled solely by spatial_radius and
+            # SelfTR's cube is controlled solely by spatial_radius and
             # temporal_window. Legacy N4/N8 neighborhood labels must not
             # alter this topology.
             offsets = self._spatiotemporal_cube_undirected_spatial_offsets(
@@ -2733,7 +2736,7 @@ class Aggregator(nn.Module):
         merge_top_similarity_percent: float = 100.0,
         initial_edges_are_unique: bool = False,
     ) -> tuple[np.ndarray, np.ndarray, dict[str, object]]:
-        """Batch U-M merges using mutual nearest-neighbor components.
+        """Batch SelfTR merges using mutual nearest-neighbor components.
 
         Each round evaluates the exact whole-group merge increment on every
         current graph edge, selects ``A-best(B)``/``B-best(A)`` pairs, and
@@ -2783,7 +2786,10 @@ class Aggregator(nn.Module):
 
         profile_cuda = (
             device.type == "cuda"
-            and os.environ.get("VGGT_UM_PLANNER_PROFILE", "0") == "1"
+            and os.environ.get(
+                "SELFTR_PLANNER_PROFILE",
+                os.environ.get("VGGT_UM_PLANNER_PROFILE", "0"),
+            ) == "1"
         )
         profile_events: dict[
             str, list[tuple[torch.cuda.Event, torch.cuda.Event]]
@@ -2870,7 +2876,7 @@ class Aggregator(nn.Module):
                     <= int(max_group_size)
                 )
             profile_event = profile_start()
-            edge_cost = fused_um_edge_cost(
+            edge_cost = fused_selftr_edge_cost(
                 group_sums,
                 group_weights,
                 group_representatives,
@@ -3222,7 +3228,7 @@ class Aggregator(nn.Module):
         cost_denominator: float | None = None,
         prefer_best_parent: bool = False,
     ) -> tuple[np.ndarray, np.ndarray, dict[str, object]]:
-        """Greedy local whole-group merging used by H-M and U-M.
+        """Greedy local whole-group merging used by H-M and SelfTR.
 
         The queue is local in time and space, but its priority is recomputed
         after every group merge.  A group's error is represented exactly for
@@ -3765,7 +3771,7 @@ class Aggregator(nn.Module):
         reallocate: bool,
         lambda_cost: float | None = None,
     ) -> TemporalRepresentativeBatchPlan:
-        """Build U-M/U-R plans on the local time/space candidate graph."""
+        """Build SelfTR/U-R plans on the local time/space candidate graph."""
 
         num_frames, num_tokens, embed_dim = tokens.shape
         patch_count = num_tokens - self.patch_token_start
@@ -3944,7 +3950,7 @@ class Aggregator(nn.Module):
         *,
         source_layer: int,
     ) -> list[TemporalRepresentativeBatchPlan]:
-        """Build one of H-M, H-R, U-M, or U-R using a shared plan format."""
+        """Build one of H-M, H-R, SelfTR, or U-R using a shared plan format."""
 
         started = time.perf_counter()
         self._hybrid_debug = []
@@ -3974,7 +3980,7 @@ class Aggregator(nn.Module):
                 )
         batch_debug = list(self._hybrid_debug)
         first = batch_debug[0] if batch_debug else {}
-        uses_lambda = mode in {"h-m", "h-r", "u-m", "u-r"}
+        uses_lambda = mode in {"h-m", "h-r", "selftr", "u-r"}
         is_reallocation = mode in {"h-r", "u-r"}
         self.last_frame_fusion_debug = {
             "mode": mode,
@@ -3987,12 +3993,12 @@ class Aggregator(nn.Module):
             ),
             "candidate_topology": (
                 "spatiotemporal_cube_by_radius_and_window"
-                if mode == "u-m"
+                if mode == "selftr"
                 else "legacy_spatial_neighborhood"
             ),
             "spatial_neighborhood": (
                 None
-                if mode == "u-m"
+                if mode == "selftr"
                 else getattr(self, "frame_fusion_spatial_neighborhood", "N8")
             ),
             "temporal_window": getattr(self, "frame_fusion_temporal_window", 1),
@@ -4017,14 +4023,14 @@ class Aggregator(nn.Module):
             },
             "selection": (
                 "mutual_nearest_neighbor_delta_E_lt_2_lambda"
-                if mode == "u-m"
+                if mode == "selftr"
                 else "min(D_m_normalized + lambda_cost * M_m_normalized)"
                 if uses_lambda
                 else "geometric_knee"
             ),
             "stopping_rule": (
                 "delta_E < 2 * lambda_cost"
-                if mode == "u-m"
+                if mode == "selftr"
                 else "full_curve_selection"
                 if uses_lambda
                 else "geometric_knee"
@@ -4061,7 +4067,7 @@ class Aggregator(nn.Module):
                 else getattr(self, "frame_fusion_representative_update", "parent")
             ),
             "representative_value_aggregation": (
-                "group-mean" if mode == "u-m" else "source-token"
+                "group-mean" if mode == "selftr" else "source-token"
             ),
             "attention_only": True,
             "mlp_scope": "full_original_token_sequence",
@@ -4095,7 +4101,7 @@ class Aggregator(nn.Module):
             source_layer in getattr(self, "frame_fusion_recompute_layers", ())
             or (
                 getattr(self, "frame_fusion_recompute_each_global", False)
-                and self.frame_fusion_mode in {"h-m", "h-r", "u-m", "u-r"}
+                and self.frame_fusion_mode in {"h-m", "h-r", "selftr", "u-r"}
                 and (
                     source_layer < 0
                     or self.inter_frame_attention_types[source_layer] == "global"
@@ -4858,8 +4864,8 @@ class Aggregator(nn.Module):
             frame_tokens = tokens[batch_index]
             special_tokens = frame_tokens[:, :patch_start].reshape(-1, embed_dim)
             patch_tokens = frame_tokens[:, patch_start:].reshape(-1, embed_dim)
-            if self.frame_fusion_mode == "u-m":
-                # Keep the final U-M partition fixed, but summarize each
+            if self.frame_fusion_mode == "selftr":
+                # Keep the final SelfTR partition fixed, but summarize each
                 # group with all of its current tokens instead of one parent.
                 representatives = self._mean_group_representatives(
                     patch_tokens,
@@ -5630,7 +5636,7 @@ class Aggregator(nn.Module):
                     plans=spatial_representative_plans,
                 )
             if (
-                self.frame_fusion_mode in {"h-m", "h-r", "u-m", "u-r"}
+                self.frame_fusion_mode in {"h-m", "h-r", "selftr", "u-r"}
                 and spatiotemporal_representative_plans is not None
             ):
                 return self._run_temporal_representative_global_attention_block(
