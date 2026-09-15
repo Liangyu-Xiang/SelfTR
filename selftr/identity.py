@@ -17,10 +17,6 @@ DEFAULT_METHOD_NAME = "SelfTR"
 METHOD_ID = "selftr"
 """Stable machine-readable identifier used by the API and CLI."""
 
-LEGACY_METHOD_ALIASES = frozenset({"u-m", "u_m", "um"})
-"""Deprecated identifiers accepted only to keep existing experiment commands working."""
-
-
 def resolve_method_name(name: str | None = None) -> str:
     """Return a non-empty display name, honoring ``SELFTR_METHOD_NAME``.
 
@@ -36,10 +32,9 @@ def resolve_method_name(name: str | None = None) -> str:
 
 
 def canonical_frame_fusion_mode(mode: str) -> str:
-    """Normalize the public SelfTR mode and its deprecated U-M aliases."""
+    """Normalize the public SelfTR mode."""
 
-    normalized = str(mode).strip().lower().replace("_", "-")
-    return METHOD_ID if normalized in LEGACY_METHOD_ALIASES else normalized
+    return str(mode).strip().lower().replace("_", "-")
 
 
 def is_selftr_mode(mode: str) -> bool:
@@ -51,7 +46,6 @@ def is_selftr_mode(mode: str) -> bool:
 __all__ = [
     "DEFAULT_METHOD_NAME",
     "METHOD_ID",
-    "LEGACY_METHOD_ALIASES",
     "canonical_frame_fusion_mode",
     "is_selftr_mode",
     "resolve_method_name",

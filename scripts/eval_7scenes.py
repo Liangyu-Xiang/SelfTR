@@ -67,7 +67,7 @@ def parse_args() -> argparse.Namespace:
                         help="optional cap after stride sampling; omit for all available frames")
     parser.add_argument("--merge-ratio", type=float, default=0.9)
     parser.add_argument("--lambda-cost", type=float, default=0.04,
-                        help="SelTR U-M cost coefficient; used only with --method selftr")
+                        help="SelfTR cost coefficient; used only with --method selftr")
     parser.add_argument("--sequences", nargs="*", default=None, metavar="SCENE/SEQ")
     parser.add_argument("--fastvggt-sample-points", type=int, default=999_999)
     parser.add_argument("--fastvggt-random-seed", type=int, default=33)

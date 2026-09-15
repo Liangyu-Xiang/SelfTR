@@ -9,8 +9,7 @@ def test_identity_uses_a_stable_id_and_editable_display_name(monkeypatch):
     assert resolve_method_name() == "Renamed Method"
 
 
-def test_legacy_um_mode_maps_to_selftr():
-    assert canonical_frame_fusion_mode("u-m") == METHOD_ID
+def test_selftr_mode_is_canonical():
     assert canonical_frame_fusion_mode("selftr") == METHOD_ID
 
 

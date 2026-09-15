@@ -1,4 +1,4 @@
-"""Optional Triton edge-cost kernel for SelfTR's exact U-M planner.
+"""Optional Triton edge-cost kernel for SelfTR's exact grouping planner.
 
 The kernel implements the same whole-group DeltaE objective as the PyTorch
 fallback, but retains the per-edge feature vectors in registers and materializes
@@ -99,7 +99,7 @@ def fused_um_edge_cost(
     *,
     prefer_best_parent: bool,
 ) -> torch.Tensor | None:
-    """Return exact per-edge U-M costs, or ``None`` for the PyTorch fallback.
+    """Return exact per-edge SelfTR costs, or ``None`` for the PyTorch fallback.
 
     Set ``SELFTR_UM_TRITON=0`` to disable this optional acceleration.  The
     block size can be tuned without changing algorithmic results via

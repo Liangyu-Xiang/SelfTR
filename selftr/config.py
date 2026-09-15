@@ -11,7 +11,7 @@ from .identity import METHOD_ID, resolve_method_name
 class SelfTRConfig:
     """Inference-time parameters for SelfTR token compression.
 
-    The defaults match the previous U-M implementation.  They are deliberately
+    The defaults match the original SelfTR implementation.  They are deliberately
     collected here so a paper release can version one explicit configuration
     instead of relying on scattered command-line defaults.
     """

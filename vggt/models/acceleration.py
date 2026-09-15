@@ -206,7 +206,7 @@ class SpatialMergePlan:
 
 @dataclass
 class UMPlan:
-    """One-refresh U-M representative map for a flattened VGGT global block."""
+    """One-refresh SelfTR representative map for a flattened VGGT global block."""
     inverse: torch.Tensor
     representative_indices: torch.Tensor
     original_tokens: int
@@ -219,21 +219,21 @@ class UMPlan:
 def build_um_plan(metric: torch.Tensor, *, num_frames: int, patch_start: int,
                   grid_size: tuple[int, int], spatial_radius: int = 2,
                   temporal_window: int = 4, lambda_cost: float = 0.04) -> UMPlan:
-    """Build a GPU U-M map from norm1 features on local time/space edges.
+    """Build a GPU SelfTR map from norm1 features on local time/space edges.
 
     The first frame and all per-frame special tokens are protected.  Remaining
     tokens are paired only when they are mutual best local neighbours and their
-    cosine distortion is below the U-M lambda threshold.  This is the same
+    cosine distortion is below the SelfTR lambda threshold.  This is the same
     representative-token contract as Omega: merge before global attention and
     restore every member from its representative afterwards.
     """
     if metric.shape[0] != 1:
-        raise ValueError("U-M currently requires batch size 1")
+        raise ValueError("SelfTR currently requires batch size 1")
     h, w = grid_size
     per_frame = patch_start + h * w
     total = metric.shape[1]
     if total != num_frames * per_frame:
-        raise ValueError("U-M token layout does not match frames and patch grid")
+        raise ValueError("SelfTR token layout does not match frames and patch grid")
     device = metric.device
     inverse = torch.arange(total, device=device)
     if num_frames <= 1:
@@ -287,7 +287,7 @@ def build_um_plan(metric: torch.Tensor, *, num_frames: int, patch_start: int,
 
 
 def um_attention(attention, x: torch.Tensor, pos: torch.Tensor | None, plan: UMPlan) -> torch.Tensor:
-    """Aggregate Q/K/V per U-M representative, attend, then restore members."""
+    """Aggregate Q/K/V per SelfTR representative, attend, then restore members."""
     batch, _, channels = x.shape
     qkv = attention.qkv(x).reshape(batch, -1, 3, attention.num_heads, attention.head_dim).permute(2, 0, 3, 1, 4)
     q, k, v = attention.q_norm(qkv[0]), attention.k_norm(qkv[1]), qkv[2]

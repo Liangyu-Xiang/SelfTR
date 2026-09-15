@@ -178,7 +178,7 @@ class Aggregator(nn.Module):
         if um_policy not in {"cosine-fixed", "deltae-fixed", "deltae-adaptive"}:
             raise ValueError("um_policy must be cosine-fixed, deltae-fixed, or deltae-adaptive")
         if um_policy.endswith("-fixed") and um_target_full_attention_ratio is None:
-            raise ValueError("fixed U-M policies require um_target_full_attention_ratio")
+            raise ValueError("fixed SelfTR policies require um_target_full_attention_ratio")
         self.um_policy = um_policy
         self.um_target_full_attention_ratio = um_target_full_attention_ratio
         self._um_plan = None
@@ -490,7 +490,7 @@ class Aggregator(nn.Module):
                 tokens = tokens + self.global_blocks[block_idx].ls1(residual)
                 tokens = tokens + self.global_blocks[block_idx].ls2(self.global_blocks[block_idx].mlp(self.global_blocks[block_idx].norm2(tokens)))
                 self.last_token_merging_stats.append({
-                    "block": block_idx, "mode": "u-m",
+                    "block": block_idx, "mode": "selftr",
                     "original_tokens": int(S * P),
                     "active_tokens": int(S * self.patch_start_idx + self._um_plan.representative_source_indices.numel()),
                     "full_attention_token_ratio": float((S * self.patch_start_idx + self._um_plan.representative_source_indices.numel()) / (S * P)),

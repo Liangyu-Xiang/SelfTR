@@ -1,7 +1,7 @@
 """SelfTR planner and representative attention for original VGGT.
 
-This is the same U-M semantics as VGGT-Omega: frame 0 is protected; the
-remaining patch tokens are greedily coalesced on an r-by-r, t-frame local
+SelfTR protects frame 0; remaining patch tokens are greedily coalesced on an
+r-by-r, t-frame local
 cube by exact whole-group cosine reconstruction cost; every final group is
 represented by the mean *token* before Q/K/V projection.  Only the global
 attention residual is compressed and expanded; Pi3's MLP still receives every
@@ -32,9 +32,9 @@ class UMPlan:
 
 
 def _cube_edges(num_frames: int, height: int, width: int, radius: int, window: int, device: torch.device):
-    """Omega's canonical U-M topology, with protected frame zero removed."""
+    """SelfTR's canonical topology, with protected frame zero removed."""
     if radius <= 0 or window <= 0:
-        raise ValueError("U-M spatial radius and temporal window must be positive")
+        raise ValueError("SelfTR spatial radius and temporal window must be positive")
     patch_count = height * width
     pieces_l, pieces_r = [], []
     grid = torch.arange(patch_count, device=device, dtype=torch.long).view(height, width)
@@ -91,7 +91,7 @@ def _merge_groups(
     target_count: int | None = None,
     min_keep_ratio: float = 0.05,
 ):
-    """GPU batch mutual-nearest U-M merge.
+    """GPU batch mutual-nearest SelfTR merge.
 
     ``deltae-adaptive`` is the STAR planner: it accepts a mutual pair only
     when its whole-group marginal distortion is below ``2 * lambda``.
@@ -101,7 +101,7 @@ def _merge_groups(
     ``deltae-fixed`` ranks them by the exact whole-group marginal distortion.
     """
     if policy not in {"cosine-fixed", "deltae-fixed", "deltae-adaptive"}:
-        raise ValueError(f"Unknown U-M policy: {policy!r}")
+        raise ValueError(f"Unknown SelfTR policy: {policy!r}")
     is_fixed = policy.endswith("-fixed")
     if is_fixed and target_count is None:
         raise ValueError(f"{policy} requires target_count")
@@ -144,7 +144,7 @@ def _merge_groups(
             # VGGT video.  Indexing ``sums[edge_left]`` in one operation
             # creates an [edges, 1024] tensor (over 100 GiB), although only
             # the scalar marginal cost for each edge is needed.  Keep the
-            # exact U-M objective but score independent edge chunks.
+            # exact SelfTR objective but score independent edge chunks.
             edge_cost = torch.empty(edge_left.numel(), device=features.device, dtype=torch.float32)
             chunk_size = 8192
             for start in range(0, edge_left.numel(), chunk_size):
@@ -285,12 +285,12 @@ def um_attention(attn, x, plan: UMPlan, *, norm1, xpos=None, representative_mode
     if representative_mode == "mean":
         representatives = _mean_groups(patch, mapping, int(plan.representative_source_indices.numel()))
     elif representative_mode == "last":
-        # Use the final parent selected by the U-M planner, without changing
-        # the U-M partition or its representative selection objective.
+        # Use the final parent selected by SelfTR, without changing its
+        # partition or representative selection objective.
         representatives = patch.index_select(0, plan.representative_source_indices)
     else:
-        raise ValueError(f"Unknown U-M representative_mode={representative_mode!r}; expected 'mean' or 'last'")
-    # This ordering is deliberate: U-M summarizes current *raw* token states,
+        raise ValueError(f"Unknown SelfTR representative_mode={representative_mode!r}; expected 'mean' or 'last'")
+    # This ordering is deliberate: SelfTR summarizes current *raw* token states,
     # then runs the block's normal norm1 and Q/K/V projection on the compact
     # sequence. Averaging normalized tokens or projected Q/K/V changes the
     # method's objective and is what the previous Pi3 adapter did.

@@ -603,7 +603,7 @@ def main() -> None:
     model = build_model(args.method, args.checkpoint, device)
     if args.method == "selftr":
         backend = "triton_fused" if warmup_selftr_um_kernel(model, device) else "pytorch"
-        print(f"SelfTR U-M edge-cost backend: {backend}", flush=True)
+        print(f"SelfTR edge-cost backend: {backend}", flush=True)
     protocol = {"sampler": "endpoint-preserving uniform: first and last valid RGB/pose/depth frames + uniform interior",
                 "image_preprocessing": "FastVGGT ScanNet: width=518, aspect-preserving height rounded to a multiple of 14",
                 "geometry": "FastVGGT coordinate recovery + bbox scale alignment; deterministic 100k streaming sample; 0.05m voxel",
@@ -612,7 +612,7 @@ def main() -> None:
                 "pose_note": "AUC@330 is reported as AUC@30; RPW-trans is reported as RPE-trans.",
                 "fastvggt_pose": "FastVGGT EVO APE/RPE calls with Sim(3) alignment; EVO>=1.36 omits the source's incompatible align_origin=True flag.",
                 "visualization": "optional coloured predicted/GT point clouds and FastVGGT-style Sim(3)-aligned XZ trajectory",
-                "token_note": "fixed policies log one retention value; SelTR logs all three U-M refresh stages."}
+                "token_note": "fixed policies log one retention value; SelfTR logs all three refresh stages."}
     results, failures = [], []
     for number, scene in enumerate(scenes, 1):
         scene_output = args.output_dir / scene / "metrics.json"
