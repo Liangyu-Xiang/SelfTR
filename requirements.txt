@@ -8,3 +8,4 @@ opencv-python
 scipy
 open3d>=0.18
 huggingface_hub
+evo

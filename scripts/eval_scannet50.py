@@ -11,6 +11,7 @@ downsampling.  ``cd_m`` is the FastVGGT-compatible bidirectional *sum*;
 from __future__ import annotations
 
 import argparse
+from copy import deepcopy
 import json
 import sys
 import time
@@ -24,6 +25,11 @@ import torch
 import torch.nn.functional as F
 from PIL import Image
 from scipy.spatial import cKDTree
+from scipy.spatial.transform import Rotation
+from evo.core.metrics import PoseRelation, Unit
+from evo.core.trajectory import PoseTrajectory3D
+import evo.main_ape as evo_ape
+import evo.main_rpe as evo_rpe
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
@@ -60,6 +66,8 @@ def write_json(path: Path, payload: dict) -> None:
 
 def numeric_paths(directory: Path, suffixes: tuple[str, ...]) -> dict[int, Path]:
     result = {}
+    if not directory.is_dir():
+        return result
     for path in directory.iterdir():
         if path.suffix.lower() in suffixes:
             try:
@@ -97,7 +105,10 @@ def scene_records(scene_dir: Path, requested: int, require_exact: bool = False) 
         depths = numeric_paths(scene_dir, (".png",))
         poses = numeric_paths(scene_dir, (".txt",))
     ids, matrices = [], []
-    for frame_id in sorted(set(images) & set(depths) & set(poses)):
+    valid_ids = set(images) & set(poses)
+    if depths:
+        valid_ids &= set(depths)
+    for frame_id in sorted(valid_ids):
         pose = np.loadtxt(poses[frame_id], dtype=np.float64)
         if pose.shape == (4, 4) and np.isfinite(pose).all():
             ids.append(frame_id)
@@ -105,10 +116,10 @@ def scene_records(scene_dir: Path, requested: int, require_exact: bool = False) 
     if require_exact and len(ids) < requested:
         raise RuntimeError(
             f"{scene_dir.name} has only {len(ids)} valid frames, but {requested} are required. "
-            "Point --dataset-root to the fully extracted ScanNet frames; do not use the 300-frame cache."
+            "Point --dataset-root to a full ScanNet RGB/pose extraction."
         )
     selected = endpoint_uniform_indices(len(ids), requested)
-    records = [{"id": ids[i], "image": images[ids[i]], "depth": depths[ids[i]]} for i in selected]
+    records = [{"id": ids[i], "image": images[ids[i]], "depth": depths.get(ids[i])} for i in selected]
     return records, np.stack(matrices, axis=0)[selected]
 
 
@@ -265,6 +276,7 @@ def reconstruction_metrics(prediction: np.ndarray, gt_path: Path, voxel: float, 
         "comp_m": comp, "comp_median_m": float(np.median(gt_to_pred)),
         "nc": float((nc_a.mean() + nc_b.mean()) / 2), "nc_median": float((np.median(nc_a) + np.median(nc_b)) / 2),
         "cd_m": acc + comp, "overall_m": (acc + comp) / 2,
+        "fastvggt_acc_m": acc, "fastvggt_comp_m": comp, "fastvggt_cd_m": acc + comp,
         "f1_at_0.05m": f1, "precision_at_0.05m": precision, "recall_at_0.05m": recall,
         "pred_points_after_voxel": int(len(pred_cloud.points)), "gt_points_after_voxel": int(len(gt_cloud.points)),
     }
@@ -320,6 +332,8 @@ def irls_scale_shift(pred: np.ndarray, gt: np.ndarray, iterations: int = 8) -> t
 
 
 def depth_metrics(prediction: np.ndarray, records: list[dict[str, Any]], max_depth: float = 10.0) -> dict[str, float]:
+    if any(record["depth"] is None for record in records):
+        return {}
     gt_all, pred_all = [], []
     for depth, record in zip(prediction, records):
         gt = np.asarray(Image.open(record["depth"]), dtype=np.float32) / 1000.0
@@ -394,6 +408,32 @@ def pose_metrics(predicted_c2w: np.ndarray, gt_c2w_world: np.ndarray) -> tuple[d
     return values, aligned, gt
 
 
+def fastvggt_trajectory_metrics(predicted_c2w: np.ndarray, gt_c2w_world: np.ndarray) -> dict[str, float]:
+    """Exact metric calls and pose convention from FastVGGT eval_utils.eval_trajectory."""
+    gt_c2w = np.linalg.inv(gt_c2w_world[0]) @ gt_c2w_world
+    poses_est, poses_gt = np.linalg.inv(predicted_c2w), np.linalg.inv(gt_c2w)
+    trajectory_gt = PoseTrajectory3D(
+        positions_xyz=poses_gt[:, :3, 3],
+        orientations_quat_wxyz=Rotation.from_matrix(poses_gt[:, :3, :3]).as_quat(scalar_first=True),
+        timestamps=np.arange(len(poses_gt)),
+    )
+    trajectory_est = PoseTrajectory3D(
+        positions_xyz=poses_est[:, :3, 3],
+        orientations_quat_wxyz=Rotation.from_matrix(poses_est[:, :3, :3]).as_quat(scalar_first=True),
+        timestamps=np.arange(len(poses_est)),
+    )
+    # FastVGGT's source passes align_origin=True as well. EVO >= 1.36 rejects
+    # that contradictory combination; Sim(3) alignment is the operative part.
+    common = {"est_name": "traj", "align": True, "correct_scale": True}
+    ate = evo_ape.ape(deepcopy(trajectory_gt), deepcopy(trajectory_est), pose_relation=PoseRelation.translation_part, **common)
+    are = evo_ape.ape(deepcopy(trajectory_gt), deepcopy(trajectory_est), pose_relation=PoseRelation.rotation_angle_deg, **common)
+    rpe_common = {**common, "delta": 1, "delta_unit": Unit.frames, "rel_delta_tol": 0.01, "all_pairs": True}
+    rpe_rot = evo_rpe.rpe(deepcopy(trajectory_gt), deepcopy(trajectory_est), pose_relation=PoseRelation.rotation_angle_deg, **rpe_common)
+    rpe_trans = evo_rpe.rpe(deepcopy(trajectory_gt), deepcopy(trajectory_est), pose_relation=PoseRelation.translation_part, **rpe_common)
+    return {"fastvggt_ate_m": float(ate.stats["rmse"]), "fastvggt_are_deg": float(are.stats["rmse"]),
+            "fastvggt_rpe_rot_deg": float(rpe_rot.stats["rmse"]), "fastvggt_rpe_trans_m": float(rpe_trans.stats["rmse"])}
+
+
 def save_trajectory_visualization(prediction: np.ndarray, target: np.ndarray, output_path: Path) -> None:
     """FastVGGT-style XZ trajectory view, colour-coding Sim(3)-aligned APE."""
     import matplotlib
@@ -461,6 +501,7 @@ def evaluate_scene(model: VGGT, scene: str, records: list[dict[str, Any]], gt_c2
         raise FileNotFoundError(gt_ply)
     geometry, pred_cloud, gt_cloud = reconstruction_metrics(sampler.value(), gt_ply, args.voxel_size, args.chamfer_max_distance, args.tau)
     pose, aligned_c2w, local_gt_c2w = pose_metrics(pred_c2w, gt_c2w)
+    fast_pose = fastvggt_trajectory_metrics(pred_c2w, gt_c2w)
     depth_result = depth_metrics(depth, records)
     visualization = None
     if args.save_visualizations:
@@ -473,7 +514,7 @@ def evaluate_scene(model: VGGT, scene: str, records: list[dict[str, Any]], gt_c2
             "trajectory_png": str(visualization_dir / "trajectory_xz.png"),
         }
     result = {"scene": scene, "frames": len(records), "frame_ids": [item["id"] for item in records],
-              "pose": pose, "reconstruction": geometry, "depth": depth_result,
+              "pose": pose, "fastvggt_pose": fast_pose, "reconstruction": geometry, "depth": depth_result,
               "visualization": visualization,
               "efficiency": {"latency_s": latency_s, "inference_time_s": latency_s, "fps": len(records) / latency_s,
                              "peak_vram_allocated_gib": allocated_gib, "peak_vram_reserved_gib": reserved_gib,
@@ -498,6 +539,7 @@ def main() -> None:
     parser.add_argument("--scenes", nargs="*", default=None)
     parser.add_argument("--max-scenes", type=int, default=None)
     parser.add_argument("--resume", action="store_true")
+    parser.add_argument("--skip-summary", action="store_true", help="write per-scene files only; for multi-GPU workers")
     parser.add_argument("--require-exact-frames", action="store_true",
                         help="fail rather than silently evaluate a short sequence with fewer than --num-frames")
     parser.add_argument("--depth-confidence-threshold", type=float, default=1.0)
@@ -539,6 +581,7 @@ def main() -> None:
                 "cd_m": "FastVGGT-compatible clipped bidirectional sum Acc+Comp (clip=0.5m)",
                 "overall_m": "(Acc+Comp)/2", "tau_m": args.tau,
                 "pose_note": "AUC@330 is reported as AUC@30; RPW-trans is reported as RPE-trans.",
+                "fastvggt_pose": "FastVGGT EVO APE/RPE calls with Sim(3) alignment; EVO>=1.36 omits the source's incompatible align_origin=True flag.",
                 "visualization": "optional coloured predicted/GT point clouds and FastVGGT-style Sim(3)-aligned XZ trajectory",
                 "token_note": "fixed policies log one retention value; SelTR logs all three U-M refresh stages."}
     results, failures = [], []
@@ -564,6 +607,7 @@ def main() -> None:
     summary = {"method": args.method, "num_frames_requested": args.num_frames, "scene_count": len(results),
                "failed_scene_count": len(failures), "protocol": protocol, "scenes": results, "failures": failures,
                "mean_pose": numeric_mean([item["pose"] for item in results]),
+               "mean_fastvggt_pose": numeric_mean([item["fastvggt_pose"] for item in results]),
                "mean_reconstruction": numeric_mean([item["reconstruction"] for item in results]),
                "mean_depth": numeric_mean([item["depth"] for item in results]),
                "mean_efficiency": numeric_mean([item["efficiency"] for item in results])}
@@ -577,8 +621,9 @@ def main() -> None:
     else:
         values = [x["retention_percent"] for x in token_values if x.get("retention_percent") is not None]
         summary["token_retention"] = {"policy": "fixed_once", "retention_percent": float(np.mean(values)) if values else None}
-    write_json(args.output_dir / "metrics.json", summary)
-    print(json.dumps({"output": str(args.output_dir / 'metrics.json'), "completed": len(results), "failed": len(failures)}), flush=True)
+    if not args.skip_summary:
+        write_json(args.output_dir / "metrics.json", summary)
+        print(json.dumps({"output": str(args.output_dir / 'metrics.json'), "completed": len(results), "failed": len(failures)}), flush=True)
     if failures:
         raise SystemExit(1)
 
