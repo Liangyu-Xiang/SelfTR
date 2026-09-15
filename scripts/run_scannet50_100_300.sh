@@ -16,7 +16,9 @@ mapfile -t SCENES < <(find "$DATA_ROOT" -mindepth 1 -maxdepth 1 -type d -name 's
 run_worker() {
   local gpu=$1 worker=$2
   for spec in densevggt:100 fastvggt:100 selftr:100 densevggt:300 fastvggt:300 selftr:300; do
-    local method=${spec%%:*} frames=${spec##*:} output="$OUTPUT_ROOT/${method}_${frames}"
+    local method=${spec%%:*}
+    local frames=${spec##*:}
+    local output="$OUTPUT_ROOT/${method}_${frames}"
     local selected=()
     for index in "${!SCENES[@]}"; do
       if (( index % ${#GPUS[@]} == worker )); then selected+=("${SCENES[index]}"); fi
