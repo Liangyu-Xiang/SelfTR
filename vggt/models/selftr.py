@@ -14,9 +14,10 @@ import math
 import torch
 import torch.nn.functional as F
 
-# The reference PyTorch planner is self-contained.  It deliberately has no
-# machine-local Omega or Pi3 dependency.
-_fused_um_edge_cost = None
+try:
+    from .um_triton import fused_um_edge_cost as _fused_um_edge_cost
+except ImportError:  # Triton remains optional for CPU/minimal installations.
+    _fused_um_edge_cost = None
 
 
 @dataclass(frozen=True)

@@ -151,7 +151,12 @@ def build_model(method: str, checkpoint: Path, device: torch.device) -> VGGT:
                       um_policy="deltae-adaptive", um_refresh_layers="0,9,21")
     model = VGGT(**kwargs)
     model.load_state_dict(checkpoint_state(checkpoint), strict=True)
-    return model.eval().to(device=device, dtype=torch.bfloat16)
+    model = model.eval().to(device=device, dtype=torch.bfloat16)
+    # VGGT keeps its heads in FP32 by default.  The model provides this flag
+    # for the all-BF16 long-sequence inference path so the heads execute under
+    # a matching autocast context as well.
+    model.explicit_bfloat16_inference = True
+    return model
 
 
 def homogeneous(matrix: np.ndarray) -> np.ndarray:
@@ -596,6 +601,9 @@ def main() -> None:
             records, gt_c2w = scene_records(frames_root / scene, args.num_frames, args.require_exact_frames)
             result = evaluate_scene(model, scene, records, gt_c2w, gt_root, args, device)
             write_json(scene_output, result)
+            # A resumed experiment may replace an earlier failed attempt.
+            # Keep the per-scene status unambiguous for the final merger.
+            (args.output_dir / scene / "failure.json").unlink(missing_ok=True)
             results.append(result)
             print(f"[{number}/{len(scenes)}] {scene}: done ({result['efficiency']['latency_s']:.2f}s)", flush=True)
         except Exception as exc:

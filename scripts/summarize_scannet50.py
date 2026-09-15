@@ -26,7 +26,10 @@ def main() -> None:
     for path in sorted(args.output_dir.glob("scene*/metrics.json")):
         scenes.append(json.loads(path.read_text()))
     for path in sorted(args.output_dir.glob("scene*/failure.json")):
-        failures.append(json.loads(path.read_text()))
+        # A successful resumed run can coexist with a stale failure file left
+        # by an older evaluator.  The successful scene result is authoritative.
+        if not path.with_name("metrics.json").exists():
+            failures.append(json.loads(path.read_text()))
     if not scenes:
         payload = {"method": args.method, "num_frames_requested": args.num_frames, "scene_count": 0,
                    "failed_scene_count": len(failures), "scenes": [], "failures": failures,
