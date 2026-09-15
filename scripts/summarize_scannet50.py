@@ -28,7 +28,12 @@ def main() -> None:
     for path in sorted(args.output_dir.glob("scene*/failure.json")):
         failures.append(json.loads(path.read_text()))
     if not scenes:
-        raise FileNotFoundError(f"no per-scene metrics in {args.output_dir}")
+        payload = {"method": args.method, "num_frames_requested": args.num_frames, "scene_count": 0,
+                   "failed_scene_count": len(failures), "scenes": [], "failures": failures,
+                   "error": "no scene completed successfully"}
+        (args.output_dir / "metrics.json").write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+        print(json.dumps({"output": str(args.output_dir / "metrics.json"), "scenes": 0, "failures": len(failures)}))
+        return
     token = [item["efficiency"]["token_retention"] for item in scenes]
     if args.method == "selftr":
         retention = {"policy": "selftr_stagewise", "stages": [

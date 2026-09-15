@@ -21,10 +21,12 @@ run_worker() {
     for index in "${!SCENES[@]}"; do
       if (( index % ${#GPUS[@]} == worker )); then selected+=("${SCENES[index]}"); fi
     done
-    CUDA_VISIBLE_DEVICES=$gpu "$PYTHON_BIN" scripts/eval_scannet50.py \
+    if ! CUDA_VISIBLE_DEVICES=$gpu "$PYTHON_BIN" scripts/eval_scannet50.py \
       --method "$method" --checkpoint "$CHECKPOINT" --dataset-root "$DATA_ROOT" --gt-root "$GT_ROOT" \
       --num-frames "$frames" --require-exact-frames --scenes "${selected[@]}" --skip-summary --resume \
-      --device cuda:0 --output-dir "$output"
+      --device cuda:0 --output-dir "$output"; then
+      echo "GPU $gpu: $method/$frames completed with failed scenes; continuing remaining configurations" >&2
+    fi
   done
 }
 
