@@ -159,6 +159,27 @@ def build_model(method: str, checkpoint: Path, device: torch.device) -> VGGT:
     return model
 
 
+def warmup_selftr_um_kernel(model: VGGT, device: torch.device) -> bool:
+    """Compile SelfTR's optional Triton edge kernel outside measured inference."""
+    if device.type != "cuda":
+        return False
+    from vggt.models.um_triton import fused_um_edge_cost
+
+    feature_dim = int(model.aggregator.global_blocks[0].attn.qkv.in_features)
+    sums = torch.ones((2, feature_dim), device=device, dtype=torch.float32)
+    weights = torch.ones(2, device=device, dtype=torch.float32)
+    representatives = torch.arange(2, device=device, dtype=torch.long)
+    result = fused_um_edge_cost(
+        sums, weights, representatives, torch.zeros_like(weights), sums,
+        torch.tensor([0], device=device), torch.tensor([1], device=device),
+        torch.tensor([True], device=device), prefer_best_parent=True,
+    )
+    if result is None:
+        return False
+    torch.cuda.synchronize(device)
+    return True
+
+
 def homogeneous(matrix: np.ndarray) -> np.ndarray:
     if matrix.shape[-2:] == (4, 4):
         return matrix
@@ -580,6 +601,9 @@ def main() -> None:
         scenes = scenes[:args.max_scenes]
     device = torch.device(args.device)
     model = build_model(args.method, args.checkpoint, device)
+    if args.method == "selftr":
+        backend = "triton_fused" if warmup_selftr_um_kernel(model, device) else "pytorch"
+        print(f"SelfTR U-M edge-cost backend: {backend}", flush=True)
     protocol = {"sampler": "endpoint-preserving uniform: first and last valid RGB/pose/depth frames + uniform interior",
                 "image_preprocessing": "FastVGGT ScanNet: width=518, aspect-preserving height rounded to a multiple of 14",
                 "geometry": "FastVGGT coordinate recovery + bbox scale alignment; deterministic 100k streaming sample; 0.05m voxel",
