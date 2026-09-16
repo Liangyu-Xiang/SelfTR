@@ -86,7 +86,8 @@ This fairness smoke test evaluates `scene0000_00` and `scene0013_02`, each at
 100 frames for all three methods. Scene jobs are assigned round-robin over the
 provided GPU list. Because this smoke test has only two scenes, at most two
 GPUs can be busy; the formal 50-scene runners distribute all scenes over every
-provided GPU. It writes
+provided GPU. It also validates the five visualization artifacts for every
+method-scene pair; a missing PLY or PNG causes the smoke test to fail. It writes
 `smoke_comparison.md` and `smoke_comparison.json`. The report keeps project
 and FastVGGT reconstruction metrics in separate rows: project metrics are
 compared only with the local project-protocol history, and FastVGGT-path CD is
@@ -115,6 +116,7 @@ all three grouping refresh stages.
 
 With `--save-visualizations` (enabled by all three launcher scripts), each
 scene also receives `visualization/reconstruction_overlay.ply`, separate
-predicted/GT PLYs, `reconstruction.png`, and `trajectory_xz.png`.  The
-trajectory uses FastVGGT's XZ projection and colours the aligned estimated
-trajectory by absolute position error.
+predicted/GT PLYs, `reconstruction.png`, and `trajectory_xz.png`. The
+trajectory image uses FastVGGT's original `eval_trajectory(..., align=True)`
+route: world-to-camera poses, the same Sim(3) alignment, EVO XZ plotting, GT
+dashed trace, and aligned APE colour map.

@@ -29,6 +29,7 @@ from evo.core.metrics import PoseRelation, Unit
 from evo.core.trajectory import PoseTrajectory3D
 import evo.main_ape as evo_ape
 import evo.main_rpe as evo_rpe
+import evo.tools.plot as evo_plot
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(REPO_ROOT) not in sys.path:
@@ -615,32 +616,48 @@ def fastvggt_trajectory_metrics(predicted_c2w: np.ndarray, gt_c2w_world: np.ndar
                          else "sim3_align_origin_compat")}
 
 
-def save_trajectory_visualization(prediction: np.ndarray, target: np.ndarray, output_path: Path) -> None:
-    """FastVGGT-style XZ trajectory view, colour-coding Sim(3)-aligned APE."""
+def save_fastvggt_trajectory_visualization(predicted_c2w: np.ndarray, gt_c2w_world: np.ndarray,
+                                           frame_ids: list[int], output_path: Path) -> None:
+    """Save FastVGGT's exact ``eval_trajectory(..., align=True)`` XZ plot."""
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
-    from matplotlib.collections import LineCollection
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    pred_xyz, gt_xyz = prediction[:, :3, 3], target[:, :3, 3]
-    ape = np.linalg.norm(pred_xyz - gt_xyz, axis=1)
-    figure, axis = plt.subplots(figsize=(7, 6))
-    axis.plot(gt_xyz[:, 0], gt_xyz[:, 2], "--", color="0.35", linewidth=1.5, label="GT")
-    segments = np.stack((pred_xyz[:-1, (0, 2)], pred_xyz[1:, (0, 2)]), axis=1)
-    trace = LineCollection(segments, cmap="viridis", linewidth=2.0)
-    trace.set_array((ape[:-1] + ape[1:]) / 2)
-    axis.add_collection(trace)
-    axis.scatter(pred_xyz[0, 0], pred_xyz[0, 2], marker="o", c="#2673e8", s=28, label="estimated (APE colour)")
-    axis.scatter(pred_xyz[-1, 0], pred_xyz[-1, 2], marker="x", c="#2673e8", s=36)
-    axis.autoscale(); axis.set_aspect("equal", adjustable="box")
-    axis.set_xlabel("X (m)"); axis.set_ylabel("Z (m)")
-    axis.set_title("Camera trajectory after Sim(3) alignment")
-    axis.legend(loc="best")
-    colorbar = figure.colorbar(trace, ax=axis, pad=0.02)
-    colorbar.set_label("absolute position error (m)")
-    figure.tight_layout()
-    figure.savefig(output_path, dpi=180)
+    gt_c2w = np.linalg.inv(gt_c2w_world[0]) @ gt_c2w_world
+    poses_est, poses_gt = np.linalg.inv(predicted_c2w), np.linalg.inv(gt_c2w)
+    timestamps = np.asarray(frame_ids, dtype=np.float64)
+    trajectory_gt = PoseTrajectory3D(
+        positions_xyz=poses_gt[:, :3, 3],
+        orientations_quat_wxyz=Rotation.from_matrix(poses_gt[:, :3, :3]).as_quat(scalar_first=True),
+        timestamps=timestamps,
+    )
+    trajectory_est = PoseTrajectory3D(
+        positions_xyz=poses_est[:, :3, 3],
+        orientations_quat_wxyz=Rotation.from_matrix(poses_est[:, :3, :3]).as_quat(scalar_first=True),
+        timestamps=timestamps,
+    )
+    # This is the released FastVGGT eval_trajectory alignment and plotting
+    # sequence, including align_origin=not align (False here).
+    common = {"est_name": "traj", "align": True, "correct_scale": True, "align_origin": False}
+    ate_result = evo_ape.ape(
+        deepcopy(trajectory_gt), deepcopy(trajectory_est),
+        pose_relation=PoseRelation.translation_part, **common,
+    )
+    are_result = evo_ape.ape(
+        deepcopy(trajectory_gt), deepcopy(trajectory_est),
+        pose_relation=PoseRelation.rotation_angle_deg, **common,
+    )
+    figure = plt.figure()
+    axis = evo_plot.prepare_axis(figure, evo_plot.PlotMode.xz)
+    axis.set_title(f"ATE: {round(ate_result.stats['rmse'], 3)}, ARE: {round(are_result.stats['rmse'], 3)}")
+    evo_plot.traj(axis, evo_plot.PlotMode.xz, trajectory_gt, "--", "gray", "gt")
+    evo_plot.traj_colormap(
+        axis, ate_result.trajectories["traj"], ate_result.np_arrays["error_array"], evo_plot.PlotMode.xz,
+        min_map=ate_result.stats["min"], max_map=ate_result.stats["max"],
+    )
+    axis.legend()
+    figure.savefig(output_path, dpi=90)
     plt.close(figure)
 
 
@@ -696,7 +713,7 @@ def evaluate_scene(model: VGGT, scene: str, records: list[dict[str, Any]], gt_c2
         released_fastvggt_points, full_prediction_min, full_prediction_max,
         gt_ply, args.voxel_size, args.chamfer_max_distance, args.tau
     )
-    pose, aligned_c2w, local_gt_c2w = pose_metrics(pred_c2w, gt_c2w)
+    pose, _, _ = pose_metrics(pred_c2w, gt_c2w)
     fast_pose = fastvggt_trajectory_metrics(
         pred_c2w, gt_c2w, [item["id"] for item in records], exact_fastvggt=args.fairness_fastvggt_protocol
     )
@@ -708,7 +725,9 @@ def evaluate_scene(model: VGGT, scene: str, records: list[dict[str, Any]], gt_c2
             (fastvggt_pred_cloud, fastvggt_gt_cloud) if args.fairness_fastvggt_protocol else (pred_cloud, gt_cloud)
         )
         save_reconstruction_visualization(visualization_pred, visualization_gt, visualization_dir)
-        save_trajectory_visualization(aligned_c2w, local_gt_c2w, visualization_dir / "trajectory_xz.png")
+        save_fastvggt_trajectory_visualization(
+            pred_c2w, gt_c2w, [item["id"] for item in records], visualization_dir / "trajectory_xz.png"
+        )
         visualization = {
             "reconstruction_overlay_ply": str(visualization_dir / "reconstruction_overlay.ply"),
             "reconstruction_png": str(visualization_dir / "reconstruction.png"),

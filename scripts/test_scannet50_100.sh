@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Two-scene, 100-frame FastVGGT-fairness smoke test.
+# Two-scene, 100-frame FastVGGT-fairness smoke test, including visualizations.
 # Usage: bash scripts/test_scannet50_100.sh CHECKPOINT DATA_ROOT GT_ROOT [GPU_LIST] [OUTPUT_ROOT]
 # Every scene executes DenseVGGT, FastVGGT, and SelfTR in sequence on one GPU.
 CHECKPOINT=${1:?"usage: $0 CHECKPOINT DATA_ROOT GT_ROOT [GPU_LIST] [OUTPUT_ROOT]"}
@@ -11,6 +11,13 @@ GPU_LIST=${4:-0,1,2,3,4,5,6}
 OUTPUT_ROOT=${5:-outputs/scannet50_fairness_smoke_100_2scene}
 PYTHON_BIN=${EVAL_PYTHON:-python}
 SCENES=(scene0000_00 scene0013_02)
+VISUALIZATION_FILES=(
+  reconstruction_pred_aligned.ply
+  reconstruction_gt.ply
+  reconstruction_overlay.ply
+  reconstruction.png
+  trajectory_xz.png
+)
 
 IFS=',' read -r -a GPUS <<< "$GPU_LIST"
 (( ${#GPUS[@]} >= 1 )) || { echo "GPU_LIST must contain at least one GPU ID" >&2; exit 2; }
@@ -19,14 +26,28 @@ for scene in "${SCENES[@]}"; do
   [[ -f "$GT_ROOT/$scene/${scene}_vh_clean_2.ply" ]] || { echo "missing GT mesh for $scene under $GT_ROOT" >&2; exit 2; }
 done
 
+has_visualizations() {
+  local scene_output=$1 file
+  for file in "${VISUALIZATION_FILES[@]}"; do
+    [[ -s "$scene_output/visualization/$file" ]] || return 1
+  done
+}
+
 run_scene() {
   local gpu=$1 scene=$2
   for method in densevggt fastvggt selftr; do
+    local scene_output="$OUTPUT_ROOT/${method}_100/$scene"
+    local resume_args=()
+    if [[ -f "$scene_output/metrics.json" ]] && has_visualizations "$scene_output"; then
+      resume_args+=(--resume)
+    else
+      echo "[smoke] GPU ${gpu}: ${scene}, ${method}, regenerating metrics and visualizations" >&2
+    fi
     echo "[smoke] GPU ${gpu}: ${scene}, ${method}, 100 frames" >&2
     CUDA_VISIBLE_DEVICES="$gpu" "$PYTHON_BIN" scripts/eval_scannet50.py \
       --method "$method" --checkpoint "$CHECKPOINT" --dataset-root "$DATA_ROOT" --gt-root "$GT_ROOT" \
-      --num-frames 100 --require-exact-frames --scenes "$scene" --skip-summary --resume \
-      --fairness-fastvggt-protocol --device cuda:0 --output-dir "$OUTPUT_ROOT/${method}_100"
+      --num-frames 100 --require-exact-frames --scenes "$scene" --skip-summary "${resume_args[@]}" \
+      --fairness-fastvggt-protocol --save-visualizations --device cuda:0 --output-dir "$OUTPUT_ROOT/${method}_100"
   done
 }
 
@@ -38,6 +59,17 @@ for index in "${!SCENES[@]}"; do
   run_scene "$gpu" "${SCENES[index]}" & pids+=("$!")
 done
 wait "${pids[@]}"
+
+for method in densevggt fastvggt selftr; do
+  for scene in "${SCENES[@]}"; do
+    scene_output="$OUTPUT_ROOT/${method}_100/$scene"
+    if ! has_visualizations "$scene_output"; then
+      echo "[smoke] missing visualization output for ${method}/${scene}: $scene_output/visualization" >&2
+      exit 1
+    fi
+  done
+done
+echo "[smoke] visualization check passed for all ${#SCENES[@]} scenes and 3 methods" >&2
 
 "$PYTHON_BIN" scripts/report_scannet50_fairness_smoke.py \
   --output-root "$OUTPUT_ROOT" \
