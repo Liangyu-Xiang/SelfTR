@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """ScanNet50 evaluation for DenseVGGT, FastVGGT, and SelTR.
 
-The default protocol is the project's endpoint-preserving sampler.  The
+The default protocol is the project's fixed-stride sampler.  The
 ``--fairness-fastvggt-protocol`` switch is deliberately separate: it adopts
 the released FastVGGT frame-selection and token-merging path for a fair
 external comparison without altering the project's main experiment.  Every
@@ -76,20 +76,13 @@ def numeric_paths(directory: Path, suffixes: tuple[str, ...]) -> dict[int, Path]
     return result
 
 
-def endpoint_uniform_indices(length: int, requested: int) -> np.ndarray:
-    """Endpoint-preserving uniform sampler (unlike stride slicing)."""
-    if requested < 2:
-        raise ValueError("--num-frames must be at least 2 to retain both endpoints")
-    if length < 2:
-        raise ValueError("sequence has fewer than two valid RGB/pose/depth frames")
-    if requested >= length:
-        return np.arange(length, dtype=np.int64)
-    indices = np.rint(np.linspace(0, length - 1, requested)).astype(np.int64)
-    indices[0], indices[-1] = 0, length - 1
-    if len(np.unique(indices)) != requested:
-        # This should only occur when requested > length, handled above.
-        raise RuntimeError("uniform sampling produced duplicate frame indices")
-    return indices
+def stride_frame_indices(length: int, requested: int, stride: int) -> np.ndarray:
+    """Project protocol: keep every ``stride``-th valid frame, capped at N."""
+    if length < 1:
+        raise ValueError("sequence has no valid RGB/pose/depth frames")
+    if stride < 1:
+        raise ValueError("--main-frame-stride must be positive")
+    return np.arange(0, length, stride, dtype=np.int64)[:requested]
 
 
 def fastvggt_frame_indices(length: int, requested: int) -> np.ndarray:
@@ -105,7 +98,8 @@ def fastvggt_frame_indices(length: int, requested: int) -> np.ndarray:
 
 
 def scene_records(scene_dir: Path, requested: int, require_exact: bool = False,
-                  fairness_fastvggt_protocol: bool = False) -> tuple[list[dict[str, Any]], np.ndarray]:
+                  fairness_fastvggt_protocol: bool = False, main_frame_stride: int = 3,
+                  min_source_frames: int = 301) -> tuple[list[dict[str, Any]], np.ndarray]:
     # The official downloaded ScanNet50 frames are flat (00001.jpg/.png/.txt).
     # The fallback preserves compatibility with the raw ScanNet layout.
     if (scene_dir / "color").is_dir():
@@ -125,12 +119,18 @@ def scene_records(scene_dir: Path, requested: int, require_exact: bool = False,
         if pose.shape == (4, 4) and np.isfinite(pose).all():
             ids.append(frame_id)
             matrices.append(pose)
-    if require_exact and len(ids) < requested:
+    if len(ids) < min_source_frames:
         raise RuntimeError(
-            f"{scene_dir.name} has only {len(ids)} valid frames, but {requested} are required. "
-            "Point --dataset-root to a full ScanNet RGB/pose extraction."
+            f"{scene_dir.name} has only {len(ids)} valid source frames; expected a full ScanNet sequence "
+            f"with at least {min_source_frames}. Point --dataset-root to the complete processed extraction, not the 300-frame cache."
         )
-    selected = fastvggt_frame_indices(len(ids), requested) if fairness_fastvggt_protocol else endpoint_uniform_indices(len(ids), requested)
+    candidates = np.arange(len(ids), dtype=np.int64) if fairness_fastvggt_protocol else np.arange(0, len(ids), main_frame_stride, dtype=np.int64)
+    if require_exact and len(candidates) < requested:
+        raise RuntimeError(
+            f"{scene_dir.name} has {len(candidates)} selectable frames after the active sampling rule, but {requested} are required. "
+            "Point --dataset-root to a full ScanNet RGB/pose extraction or lower --num-frames."
+        )
+    selected = fastvggt_frame_indices(len(ids), requested) if fairness_fastvggt_protocol else stride_frame_indices(len(ids), requested, main_frame_stride)
     records = [{"id": ids[i], "image": images[ids[i]], "depth": depths.get(ids[i])} for i in selected]
     return records, np.stack(matrices, axis=0)[selected]
 
@@ -333,14 +333,36 @@ def fastvggt_sample_points(depth: np.ndarray, confidence: np.ndarray, c2w: np.nd
     return sampled
 
 
+def predicted_point_bounds(depth: np.ndarray, confidence: np.ndarray, c2w: np.ndarray, intrinsic: np.ndarray,
+                           first_gt_c2w: np.ndarray, threshold: float) -> tuple[np.ndarray, np.ndarray]:
+    """Full reconstructed-cloud AABB, without materializing the entire long sequence."""
+    lower = np.full(3, np.inf, dtype=np.float64)
+    upper = np.full(3, -np.inf, dtype=np.float64)
+    count = 0
+    for points in predicted_point_chunks(depth, confidence, c2w, intrinsic, first_gt_c2w, threshold):
+        lower = np.minimum(lower, points.min(axis=0))
+        upper = np.maximum(upper, points.max(axis=0))
+        count += len(points)
+    if count < 10:
+        raise RuntimeError("too few reconstruction points")
+    return lower, upper
+
+
+def bbox_scale_parameters(source_min: np.ndarray, source_max: np.ndarray,
+                          target_min: np.ndarray, target_max: np.ndarray) -> tuple[np.ndarray, float, np.ndarray]:
+    source_center = (source_max + source_min) / 2
+    target_center = (target_max + target_min) / 2
+    source_diag = np.linalg.norm(source_max - source_min)
+    target_diag = np.linalg.norm(target_max - target_min)
+    scale = 1.0 if source_diag <= 1e-8 or target_diag <= 1e-8 else target_diag / source_diag
+    return source_center, float(scale), target_center
+
+
 def bbox_scale_align(prediction: np.ndarray, target: np.ndarray) -> np.ndarray:
-    pred_min, pred_max = prediction.min(0), prediction.max(0)
-    tgt_min, tgt_max = target.min(0), target.max(0)
-    pred_diag = np.linalg.norm(pred_max - pred_min)
-    target_diag = np.linalg.norm(tgt_max - tgt_min)
-    if pred_diag <= 1e-8 or target_diag <= 1e-8:
-        return prediction
-    return (prediction - (pred_min + pred_max) / 2) * (target_diag / pred_diag) + (tgt_min + tgt_max) / 2
+    source_center, scale, target_center = bbox_scale_parameters(
+        prediction.min(0), prediction.max(0), target.min(0), target.max(0)
+    )
+    return (prediction - source_center) * scale + target_center
 
 
 def normal_consistency(source: o3d.geometry.PointCloud, target: o3d.geometry.PointCloud) -> np.ndarray:
@@ -380,17 +402,23 @@ def reconstruction_metrics(prediction: np.ndarray, gt_path: Path, voxel: float, 
     return metrics, np.asarray(pred_cloud.points), np.asarray(gt_cloud.points)
 
 
-def fastvggt_reconstruction_metrics(prediction: np.ndarray, gt_path: Path, voxel: float,
-                                    max_distance: float) -> dict[str, float]:
-    """Released FastVGGT ScanNet CD: independent 100k samples, bbox scale, 5cm voxel, clipped sum."""
+def fastvggt_reconstruction_metrics(prediction: np.ndarray, prediction_min: np.ndarray, prediction_max: np.ndarray,
+                                    gt_path: Path, voxel: float, max_distance: float) -> dict[str, float]:
+    """Released FastVGGT ScanNet CD: full-cloud bbox alignment, then independent 100k samples."""
     target = np.asarray(o3d.io.read_point_cloud(str(gt_path)).points, dtype=np.float32)
     if len(prediction) < 10 or len(target) < 10:
         raise RuntimeError("too few reconstruction points")
+    # FastVGGT computes the transform from the complete predicted and GT
+    # clouds. Applying that affine transform after selecting the same points is
+    # mathematically equivalent, while avoiding a multi-gigabyte concat.
+    source_center, scale, target_center = bbox_scale_parameters(
+        prediction_min, prediction_max, target.min(0), target.max(0)
+    )
+    prediction = (prediction - source_center) * scale + target_center
     if len(prediction) > 100000:
         prediction = prediction[np.random.RandomState(33).choice(len(prediction), 100000, replace=False)]
     if len(target) > 100000:
         target = target[np.random.RandomState(33).choice(len(target), 100000, replace=False)]
-    prediction = bbox_scale_align(prediction, target)
     pred_cloud = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(prediction)).voxel_down_sample(voxel)
     gt_cloud = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(target)).voxel_down_sample(voxel)
     acc = np.clip(np.asarray(pred_cloud.compute_point_cloud_distance(gt_cloud)), 0, max_distance)
@@ -626,8 +654,12 @@ def evaluate_scene(model: VGGT, scene: str, records: list[dict[str, Any]], gt_c2
     released_fastvggt_points = fastvggt_sample_points(
         depth, confidence, pred_c2w, intrinsic, gt_c2w[0], args.depth_confidence_threshold, args.point_sample_limit
     )
+    full_prediction_min, full_prediction_max = predicted_point_bounds(
+        depth, confidence, pred_c2w, intrinsic, gt_c2w[0], args.depth_confidence_threshold
+    )
     fastvggt_geometry = fastvggt_reconstruction_metrics(
-        released_fastvggt_points, gt_ply, args.voxel_size, args.chamfer_max_distance
+        released_fastvggt_points, full_prediction_min, full_prediction_max,
+        gt_ply, args.voxel_size, args.chamfer_max_distance
     )
     pose, aligned_c2w, local_gt_c2w = pose_metrics(pred_c2w, gt_c2w)
     fast_pose = fastvggt_trajectory_metrics(pred_c2w, gt_c2w)
@@ -666,6 +698,10 @@ def main() -> None:
     parser.add_argument("--gt-root", type=Path, default=None,
                         help="override GT mesh root; defaults to DATASET_ROOT/extracted/scannet-dataset")
     parser.add_argument("--num-frames", type=int, required=True)
+    parser.add_argument("--main-frame-stride", type=int, default=3,
+                        help="main protocol: retain every N-th valid frame before capping at --num-frames")
+    parser.add_argument("--min-source-frames", type=int, default=301,
+                        help="reject incomplete ScanNet caches; the full valid RGB/pose pool must meet this size")
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--scenes", nargs="*", default=None)
     parser.add_argument("--max-scenes", type=int, default=None)
@@ -683,6 +719,8 @@ def main() -> None:
     parser.add_argument("--fairness-fastvggt-protocol", action="store_true",
                         help="fairness-only: use released FastVGGT RGB/pose frame selection for every method; does not change the default main protocol")
     args = parser.parse_args()
+    if args.main_frame_stride < 1 or args.min_source_frames < 1:
+        raise ValueError("--main-frame-stride and --min-source-frames must be positive")
     if args.fairness_fastvggt_protocol and args.point_sample_limit != 100000:
         raise ValueError("the released FastVGGT fairness protocol fixes --point-sample-limit to 100000")
     if not torch.cuda.is_available():
@@ -716,10 +754,11 @@ def main() -> None:
     protocol = {"experiment_kind": "fairness" if args.fairness_fastvggt_protocol else "main",
                 "sampler": ("released FastVGGT: first valid RGB/pose frame then integer-stride selection from remaining valid RGB/pose frames, truncated at N"
                             if args.fairness_fastvggt_protocol else
-                            "endpoint-preserving uniform: first and last valid RGB/pose/depth frames + uniform interior"),
+                            f"project stride: every {args.main_frame_stride}-th valid RGB/pose/depth frame, capped at N"),
+                "source_frame_pool": f"at least {args.min_source_frames} valid source frames required; 300-frame caches are rejected",
                 "image_preprocessing": "FastVGGT ScanNet: width=518, aspect-preserving height rounded to a multiple of 14",
                 "reconstruction": "project reference: deterministic 100k reservoir sample + bbox scale alignment + 0.05m voxel",
-                "fastvggt_reconstruction": "released FastVGGT: concat-order-equivalent deterministic 100k choice + bbox scale alignment + 0.05m voxel",
+                "fastvggt_reconstruction": "released FastVGGT: full-cloud bbox scale alignment, then concat-order-equivalent deterministic 100k choice + 0.05m voxel",
                 "cd_m": "both paths report clipped bidirectional sum Acc+Comp (clip=0.5m) independently",
                 "overall_m": "(Acc+Comp)/2", "tau_m": args.tau,
                 "pose_note": "AUC@330 is reported as AUC@30; RPW-trans is reported as RPE-trans.",
@@ -738,6 +777,7 @@ def main() -> None:
             records, gt_c2w = scene_records(
                 frames_root / scene, args.num_frames, args.require_exact_frames,
                 fairness_fastvggt_protocol=args.fairness_fastvggt_protocol,
+                main_frame_stride=args.main_frame_stride, min_source_frames=args.min_source_frames,
             )
             result = evaluate_scene(model, scene, records, gt_c2w, gt_root, args, device)
             write_json(scene_output, result)

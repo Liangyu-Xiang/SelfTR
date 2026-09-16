@@ -5,7 +5,7 @@ set -euo pipefail
 # Usage: bash scripts/test_scannet50_100.sh /path/to/vggt_checkpoint.pt [output_root]
 CHECKPOINT=${1:?"usage: $0 CHECKPOINT [OUTPUT_ROOT]"}
 OUTPUT_ROOT=${2:-outputs/scannet50_test_100}
-SCANNET_DATA_ROOT=${SCANNET_DATA_ROOT:-/data_SSD1/mmc_lyxiang/dataset/scannet50_data}
+SCANNET_DATA_ROOT=${SCANNET_DATA_ROOT:?"set SCANNET_DATA_ROOT to a complete ScanNet extraction (the 300-frame cache is rejected)"}
 MAX_SCENES=${MAX_SCENES:-1}
 DENSE_GPU=${DENSE_GPU:-4}
 FAST_GPU=${FAST_GPU:-5}

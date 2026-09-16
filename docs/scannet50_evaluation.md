@@ -2,9 +2,11 @@
 
 `scripts/eval_scannet50.py` evaluates only the original DenseVGGT, FastVGGT,
 and SelTR variants.  It uses the 50-scene list from FastVGGT's
-`eval/scannet_50.yaml` and endpoint-preserving uniform sampling: the first and
-last valid RGB/pose/depth frames are always kept and only the interior is
-uniformly selected.  This is the project's main-evaluation protocol.
+`eval/scannet_50.yaml`.  The project's main protocol retains every third valid
+RGB/pose/depth frame, then caps the selected sequence at `--num-frames`.
+It rejects a scene with 300 or fewer valid source frames by default, preventing
+the historical 300-frame cache from being used as if it were a full ScanNet
+sequence.  Pass a complete processed ScanNet extraction via `--dataset-root`.
 
 ## FastVGGT fairness protocol
 
@@ -35,18 +37,18 @@ default.  Override them with `DENSE_GPU`, `FAST_GPU`, and `SELFTR_GPU`.  They
 also default to the FastVGGT Python environment; set `EVAL_PYTHON` to use a
 different environment.
 
-The checked-in cache at
+The historical cache at
 `/data_SSD1/mmc_lyxiang/dataset/scannet50_data/extracted/scannet-frames`
-currently has 300 frames per scene.  It is sufficient for the 100-frame smoke
-test:
+has only 300 frames per scene and is intentionally rejected by the evaluator.
+Use a full extraction for every ScanNet50 experiment, including smoke tests:
 
 ```bash
 bash scripts/test_scannet50_100.sh /path/to/vggt.pt
 ```
 
-It is intentionally rejected by the 500/1000 launchers.  Point
-`SCANNET_DATA_ROOT` to a full-frame ScanNet extraction before a formal run;
-the `--require-exact-frames` guard prevents an accidental 300-frame result.
+Point `SCANNET_DATA_ROOT` to a full-frame ScanNet extraction before a run; the
+source-pool guard and `--require-exact-frames` prevent an accidental partial
+sequence result.
 
 Each method writes per-scene `metrics.json` files and one aggregate
 `metrics.json`.  Pose output includes AUC@3/5/15/20/30, RRA/RTA@5/30, ATE,
@@ -58,8 +60,9 @@ estimated cameras, mapped back using the first GT camera, bbox-scale aligned to
 the ScanNet mesh, then sampled and voxelized at 0.05 m.  Two independently
 computed CD outputs are always written: `reconstruction.cd_m` is the project's
 deterministic reservoir-sampled reference metric, while
-`fastvggt_reconstruction.cd_m` exactly follows FastVGGT's concatenation-order
-100k random sample.  Both are clipped bidirectional sums `Acc + Comp`;
+`fastvggt_reconstruction.cd_m` exactly follows FastVGGT's full-cloud bbox
+alignment followed by its concatenation-order 100k random sample.  Both are
+clipped bidirectional sums `Acc + Comp`;
 `overall_m` is `(Acc + Comp) / 2` for the reference metric.  The same output
 includes the requested medians, normal consistency, precision/recall/F1 at
 0.05 m, depth metrics, latency, FPS, peak allocated/reserved VRAM, and token

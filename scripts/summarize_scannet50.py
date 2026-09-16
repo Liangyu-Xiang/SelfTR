@@ -49,7 +49,7 @@ def main() -> None:
     payload = {"method": args.method, "num_frames_requested": args.num_frames,
                "protocol": {"experiment_kind": "fairness" if args.fairness_fastvggt_protocol else "main",
                             "sampler": ("released FastVGGT RGB/pose integer-stride selection" if args.fairness_fastvggt_protocol
-                                        else "project endpoint-preserving uniform selection")},
+                                        else "project stride-3 RGB/pose/depth selection")},
                "scene_count": len(scenes),
                "failed_scene_count": len(failures), "scenes": scenes, "failures": failures,
                "mean_pose": numeric_mean([item["pose"] for item in scenes]),
