@@ -37,6 +37,29 @@ It renders a live terminal progress bar over all expected scene jobs
 (`50 × methods × requested frame counts`), including elapsed time and ETA.
 Set `PROGRESS_INTERVAL=10` to update it every 10 seconds.
 
+### Optional automatic shutdown after a rented-server experiment
+
+The runner itself never shuts down a machine by default.  When running on a
+rented server as root, append `/usr/bin/shutdown` to the *complete* fairness
+command according to the desired failure policy:
+
+```bash
+# Shut down only after the complete experiment and its validation succeed.
+FRAME_COUNTS="500 1000" bash scripts/run_scannet50_fairness.sh /path/to/vggt.pt \
+  /path/to/scannet50_processed /path/to/scannet_meshes 0,1,2,3,4,5,6 \
+  outputs/scannet50_fairness_v3 && /usr/bin/shutdown
+
+# Shut down regardless of whether the experiment succeeds or fails.
+FRAME_COUNTS="500 1000" bash scripts/run_scannet50_fairness.sh /path/to/vggt.pt \
+  /path/to/scannet50_processed /path/to/scannet_meshes 0,1,2,3,4,5,6 \
+  outputs/scannet50_fairness_v3 ; /usr/bin/shutdown
+```
+
+`&&` is recommended for formal experiments because it preserves the server for
+debugging if a scene fails or the final 50-scene validation rejects the run.
+The semicolon form is useful only when automatic shutdown is required even
+after an error.
+
 Run the formal configurations with a VGGT checkpoint:
 
 ```bash
