@@ -1,0 +1,58 @@
+{
+  "local_historical": {
+    "description": "Two-scene mean on scene0000_00 and scene0013_02 from this repository's local run outputs/scannet50_processed_100_300_20260915. This predates fastvggt_fairness_v3 and used the project main protocol; use for diagnosis only, not a reproduction threshold.",
+    "protocol": "project main protocol (legacy, pre-fastvggt_fairness_v3)",
+    "methods": {
+      "densevggt": {
+        "reconstruction.cd_m": 0.4260778784264455,
+        "reconstruction.f1_at_0.05m": 0.10586154507632445,
+        "reconstruction.nc": 0.6444642077708957,
+        "fastvggt_pose.fastvggt_ate_m": 0.1329298073288471,
+        "fastvggt_pose.fastvggt_are_deg": 2.5540943789191233,
+        "fastvggt_pose.fastvggt_rpe_rot_deg": 1.5620224601001362,
+        "fastvggt_pose.fastvggt_rpe_trans_m": 0.11827649397595798,
+        "efficiency.latency_s": 11.992623085039668,
+        "efficiency.fps": 8.343084439001608,
+        "efficiency.peak_vram_allocated_gib": 9.569180965423584
+      },
+      "fastvggt": {
+        "reconstruction.cd_m": 0.39096270588538445,
+        "reconstruction.f1_at_0.05m": 0.11551824211757716,
+        "reconstruction.nc": 0.6758998541365346,
+        "fastvggt_pose.fastvggt_ate_m": 0.1003661871811308,
+        "fastvggt_pose.fastvggt_are_deg": 1.8914200311745497,
+        "fastvggt_pose.fastvggt_rpe_rot_deg": 1.36726143084347,
+        "fastvggt_pose.fastvggt_rpe_trans_m": 0.10336174482533295,
+        "efficiency.latency_s": 9.050518517033197,
+        "efficiency.fps": 11.121214013381337,
+        "efficiency.peak_vram_allocated_gib": 10.304619312286377
+      },
+      "selftr": {
+        "reconstruction.cd_m": 0.44426319438504835,
+        "reconstruction.f1_at_0.05m": 0.10251106643867394,
+        "reconstruction.nc": 0.6378269388214737,
+        "fastvggt_pose.fastvggt_ate_m": 0.11845260664693963,
+        "fastvggt_pose.fastvggt_are_deg": 2.4365398285882027,
+        "fastvggt_pose.fastvggt_rpe_rot_deg": 1.4911042666154424,
+        "fastvggt_pose.fastvggt_rpe_trans_m": 0.11049828150088331,
+        "efficiency.latency_s": 8.266525132523384,
+        "efficiency.fps": 12.469959086295237,
+        "efficiency.peak_vram_allocated_gib": 9.60613465309143
+      }
+    }
+  },
+  "fastvggt_paper": {
+    "description": "FastVGGT, ICLR 2026, Table 2, ScanNet-50 reconstruction at 100 input images. Values are 50-scene means; paper timing includes its own inference timing boundary.",
+    "methods": {
+      "densevggt": {
+        "CD (FastVGGT pipeline, m)": 0.423,
+        "Latency (model-only, s)": 9.1
+      },
+      "fastvggt": {
+        "CD (FastVGGT pipeline, m)": 0.426,
+        "Latency (model-only, s)": 5.4
+      },
+      "selftr": {}
+    }
+  }
+}

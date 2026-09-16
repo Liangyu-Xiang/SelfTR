@@ -25,6 +25,18 @@ In this mode the FastVGGT baseline also uses the released protected bipartite
 merge/unmerge ordering and camera/depth heads only; the existing latency timing
 boundary is unchanged.
 
+The unified runner accepts `FRAME_COUNTS` so the formal 500/1000-frame run is:
+
+```bash
+FRAME_COUNTS="500 1000" bash scripts/run_scannet50_fairness.sh /path/to/vggt.pt \
+  /path/to/scannet50_processed /path/to/scannet_meshes 0,1,2,3,4,5,6 \
+  outputs/scannet50_fairness_v3
+```
+
+It renders a live terminal progress bar over all expected scene jobs
+(`50 × methods × requested frame counts`), including elapsed time and ETA.
+Set `PROGRESS_INTERVAL=10` to update it every 10 seconds.
+
 Run the formal configurations with a VGGT checkpoint:
 
 ```bash
@@ -43,12 +55,17 @@ has only 300 frames per scene and is intentionally rejected by the evaluator.
 Use a full extraction for every ScanNet50 experiment, including smoke tests:
 
 ```bash
-bash scripts/test_scannet50_100.sh /path/to/vggt.pt
+bash scripts/test_scannet50_100.sh /path/to/vggt.pt \
+  /path/to/scannet50_processed /path/to/scannet_meshes 0,1
 ```
 
-Point `SCANNET_DATA_ROOT` to a full-frame ScanNet extraction before a run; the
-source-pool guard and `--require-exact-frames` prevent an accidental partial
-sequence result.
+This is the two-GPU fairness smoke test: it evaluates `scene0000_00` and
+`scene0013_02`, each at 100 frames for all three methods.  It writes
+`smoke_comparison.md` and `smoke_comparison.json`, containing the measured
+two-scene mean along with the repository's historical local diagnostic values
+and the FastVGGT paper's published 50-scene CD/latency values.  Those external
+references use different protocol scopes and are deliberately not treated as
+pass/fail thresholds.
 
 Each method writes per-scene `metrics.json` files and one aggregate
 `metrics.json`.  Pose output includes AUC@3/5/15/20/30, RRA/RTA@5/30, ATE,

@@ -11,6 +11,7 @@ GPU_LIST=${4:-0,1,2,3,4,5,6}
 OUTPUT_ROOT=${5:-outputs/scannet50_fairness_v3}
 FRAME_COUNTS=${FRAME_COUNTS:-"100 300 500 1000"}
 PYTHON_BIN=${EVAL_PYTHON:-python}
+PROGRESS_INTERVAL=${PROGRESS_INTERVAL:-5}
 
 IFS=',' read -r -a GPUS <<< "$GPU_LIST"
 read -r -a FRAMES <<< "$FRAME_COUNTS"
@@ -33,11 +34,56 @@ run_worker() {
   done
 }
 
+completed_scene_jobs() {
+  local count=0 frames method
+  for frames in "${FRAMES[@]}"; do
+    for method in densevggt fastvggt selftr; do
+      if [[ -d "$OUTPUT_ROOT/${method}_${frames}" ]]; then
+        count=$((count + $(find "$OUTPUT_ROOT/${method}_${frames}" -mindepth 2 -maxdepth 2 -path '*/scene*/metrics.json' -type f | wc -l)))
+      fi
+    done
+  done
+  printf '%s' "$count"
+}
+
+progress_monitor() {
+  local total=$((50 * ${#FRAMES[@]} * 3)) start now done elapsed eta width=36 filled percent live pid
+  start=$(date +%s)
+  while true; do
+    done=$(completed_scene_jobs)
+    now=$(date +%s)
+    elapsed=$((now - start))
+    percent=$((100 * done / total))
+    filled=$((width * done / total))
+    if (( done > 0 && done < total )); then
+      eta=$((elapsed * (total - done) / done))
+      printf '\r[%-*s] %3d%%  %d/%d scene-jobs  elapsed %02d:%02d  ETA %02d:%02d' \
+        "$width" "$(printf '%*s' "$filled" '' | tr ' ' '#')" "$percent" "$done" "$total" \
+        $((elapsed / 60)) $((elapsed % 60)) $((eta / 60)) $((eta % 60)) >&2
+    else
+      printf '\r[%-*s] %3d%%  %d/%d scene-jobs  elapsed %02d:%02d' \
+        "$width" "$(printf '%*s' "$filled" '' | tr ' ' '#')" "$percent" "$done" "$total" \
+        $((elapsed / 60)) $((elapsed % 60)) >&2
+    fi
+    live=0
+    for pid in "$@"; do
+      if kill -0 "$pid" 2>/dev/null; then live=1; break; fi
+    done
+    (( live )) || break
+    sleep "$PROGRESS_INTERVAL"
+  done
+  printf '\n' >&2
+}
+
 pids=()
 for worker in "${!GPUS[@]}"; do
   run_worker "${GPUS[worker]}" "$worker" & pids+=("$!")
 done
+progress_monitor "${pids[@]}" & progress_pid=$!
+trap 'kill "$progress_pid" 2>/dev/null || true' EXIT
 wait "${pids[@]}"
+wait "$progress_pid"
+trap - EXIT
 
 for frames in "${FRAMES[@]}"; do
   for method in densevggt fastvggt selftr; do
