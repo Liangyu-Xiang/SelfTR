@@ -79,11 +79,14 @@ Use a full extraction for every ScanNet50 experiment, including smoke tests:
 
 ```bash
 bash scripts/test_scannet50_100.sh /path/to/vggt.pt \
-  /path/to/scannet50_processed /path/to/scannet_meshes 0,1
+  /path/to/scannet50_processed /path/to/scannet_meshes 0,1,2,3,4,5,6
 ```
 
-This is the two-GPU fairness smoke test: it evaluates `scene0000_00` and
-`scene0013_02`, each at 100 frames for all three methods.  It writes
+This fairness smoke test evaluates `scene0000_00` and `scene0013_02`, each at
+100 frames for all three methods. Scene jobs are assigned round-robin over the
+provided GPU list. Because this smoke test has only two scenes, at most two
+GPUs can be busy; the formal 50-scene runners distribute all scenes over every
+provided GPU. It writes
 `smoke_comparison.md` and `smoke_comparison.json`, containing the measured
 two-scene mean along with the repository's historical local diagnostic values
 and the FastVGGT paper's published 50-scene CD/latency values.  Those external

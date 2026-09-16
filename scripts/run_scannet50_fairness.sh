@@ -3,7 +3,8 @@ set -euo pipefail
 
 # Unified FastVGGT-protocol comparison for DenseVGGT, FastVGGT, and SelfTR.
 # Usage: bash scripts/run_scannet50_fairness.sh CHECKPOINT DATA_ROOT GT_ROOT [GPU_LIST] [OUTPUT_ROOT]
-# Set FRAME_COUNTS='100 300' to run only a subset while debugging.
+# Set FRAME_COUNTS='100 300' to run only a subset while debugging. All 50
+# scenes are assigned round-robin across every GPU in GPU_LIST.
 CHECKPOINT=${1:?"usage: $0 CHECKPOINT DATA_ROOT GT_ROOT [GPU_LIST] [OUTPUT_ROOT]"}
 DATA_ROOT=${2:?"usage: $0 CHECKPOINT DATA_ROOT GT_ROOT [GPU_LIST] [OUTPUT_ROOT]"}
 GT_ROOT=${3:?"usage: $0 CHECKPOINT DATA_ROOT GT_ROOT [GPU_LIST] [OUTPUT_ROOT]"}

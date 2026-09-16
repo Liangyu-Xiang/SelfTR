@@ -7,13 +7,13 @@ set -euo pipefail
 CHECKPOINT=${1:?"usage: $0 CHECKPOINT DATA_ROOT GT_ROOT [GPU_LIST] [OUTPUT_ROOT]"}
 DATA_ROOT=${2:?"usage: $0 CHECKPOINT DATA_ROOT GT_ROOT [GPU_LIST] [OUTPUT_ROOT]"}
 GT_ROOT=${3:?"usage: $0 CHECKPOINT DATA_ROOT GT_ROOT [GPU_LIST] [OUTPUT_ROOT]"}
-GPU_LIST=${4:-0,1}
+GPU_LIST=${4:-0,1,2,3,4,5,6}
 OUTPUT_ROOT=${5:-outputs/scannet50_fairness_smoke_100_2scene}
 PYTHON_BIN=${EVAL_PYTHON:-python}
 SCENES=(scene0000_00 scene0013_02)
 
 IFS=',' read -r -a GPUS <<< "$GPU_LIST"
-(( ${#GPUS[@]} == 2 )) || { echo "this smoke test requires exactly two GPUs, e.g. 0,1" >&2; exit 2; }
+(( ${#GPUS[@]} >= 1 )) || { echo "GPU_LIST must contain at least one GPU ID" >&2; exit 2; }
 for scene in "${SCENES[@]}"; do
   [[ -d "$DATA_ROOT/$scene" ]] || { echo "missing scene directory: $DATA_ROOT/$scene" >&2; exit 2; }
   [[ -f "$GT_ROOT/$scene/${scene}_vh_clean_2.ply" ]] || { echo "missing GT mesh for $scene under $GT_ROOT" >&2; exit 2; }
@@ -30,9 +30,14 @@ run_scene() {
   done
 }
 
-run_scene "${GPUS[0]}" "${SCENES[0]}" & pid_a=$!
-run_scene "${GPUS[1]}" "${SCENES[1]}" & pid_b=$!
-wait "$pid_a" "$pid_b"
+pids=()
+for index in "${!SCENES[@]}"; do
+  # Scene jobs are assigned round-robin across every GPU supplied by the user.
+  # With the default two-scene smoke test, only up to two GPUs can be busy.
+  gpu=${GPUS[index % ${#GPUS[@]}]}
+  run_scene "$gpu" "${SCENES[index]}" & pids+=("$!")
+done
+wait "${pids[@]}"
 
 "$PYTHON_BIN" scripts/report_scannet50_fairness_smoke.py \
   --output-root "$OUTPUT_ROOT" \
