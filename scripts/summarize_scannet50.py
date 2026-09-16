@@ -21,6 +21,7 @@ def main() -> None:
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--method", required=True)
     parser.add_argument("--num-frames", type=int, required=True)
+    parser.add_argument("--fairness-fastvggt-protocol", action="store_true")
     args = parser.parse_args()
     scenes, failures = [], []
     for path in sorted(args.output_dir.glob("scene*/metrics.json")):
@@ -45,11 +46,16 @@ def main() -> None:
     else:
         values = [entry.get("retention_percent") for entry in token if entry.get("retention_percent") is not None]
         retention = {"policy": "fixed_once", "retention_percent": float(np.mean(values)) if values else None}
-    payload = {"method": args.method, "num_frames_requested": args.num_frames, "scene_count": len(scenes),
+    payload = {"method": args.method, "num_frames_requested": args.num_frames,
+               "protocol": {"experiment_kind": "fairness" if args.fairness_fastvggt_protocol else "main",
+                            "sampler": ("released FastVGGT RGB/pose integer-stride selection" if args.fairness_fastvggt_protocol
+                                        else "project endpoint-preserving uniform selection")},
+               "scene_count": len(scenes),
                "failed_scene_count": len(failures), "scenes": scenes, "failures": failures,
                "mean_pose": numeric_mean([item["pose"] for item in scenes]),
                "mean_fastvggt_pose": numeric_mean([item["fastvggt_pose"] for item in scenes]),
                "mean_reconstruction": numeric_mean([item["reconstruction"] for item in scenes]),
+               "mean_fastvggt_reconstruction": numeric_mean([item.get("fastvggt_reconstruction", {}) for item in scenes]),
                "mean_depth": numeric_mean([item["depth"] for item in scenes]),
                "mean_efficiency": numeric_mean([item["efficiency"] for item in scenes]),
                "token_retention": retention}

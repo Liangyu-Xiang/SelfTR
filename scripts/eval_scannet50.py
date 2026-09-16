@@ -1,12 +1,11 @@
 #!/usr/bin/env python3
 """ScanNet50 evaluation for DenseVGGT, FastVGGT, and SelTR.
 
-The evaluator deliberately keeps the first and last valid camera frames and
-uniformly samples the interior.  Geometry follows FastVGGT's ScanNet protocol:
-depth is unprojected with the estimated cameras, mapped with the first GT
-camera, bbox-scale aligned to the ScanNet mesh, and evaluated after 5 cm voxel
-downsampling.  ``cd_m`` is the FastVGGT-compatible bidirectional *sum*;
-``overall_m`` is its conventional half, (Acc + Comp) / 2.
+The default protocol is the project's endpoint-preserving sampler.  The
+``--fairness-fastvggt-protocol`` switch is deliberately separate: it adopts
+the released FastVGGT frame-selection and token-merging path for a fair
+external comparison without altering the project's main experiment.  Every
+run reports both reference reconstruction metrics and FastVGGT-exact CD.
 """
 from __future__ import annotations
 
@@ -93,7 +92,20 @@ def endpoint_uniform_indices(length: int, requested: int) -> np.ndarray:
     return indices
 
 
-def scene_records(scene_dir: Path, requested: int, require_exact: bool = False) -> tuple[list[dict[str, Any]], np.ndarray]:
+def fastvggt_frame_indices(length: int, requested: int) -> np.ndarray:
+    """Released FastVGGT ``build_frame_selection`` rule, including tail truncation."""
+    if length < 1:
+        raise ValueError("sequence has no valid RGB/pose frames")
+    if requested < 3:
+        raise ValueError("FastVGGT fairness protocol requires --num-frames >= 3")
+    if length <= requested:
+        return np.arange(length, dtype=np.int64)
+    step = max(1, (length - 1) // (requested - 1))
+    return np.asarray([0, *range(1, length, step)][:requested], dtype=np.int64)
+
+
+def scene_records(scene_dir: Path, requested: int, require_exact: bool = False,
+                  fairness_fastvggt_protocol: bool = False) -> tuple[list[dict[str, Any]], np.ndarray]:
     # The official downloaded ScanNet50 frames are flat (00001.jpg/.png/.txt).
     # The fallback preserves compatibility with the raw ScanNet layout.
     if (scene_dir / "color").is_dir():
@@ -106,7 +118,7 @@ def scene_records(scene_dir: Path, requested: int, require_exact: bool = False) 
         poses = numeric_paths(scene_dir, (".txt",))
     ids, matrices = [], []
     valid_ids = set(images) & set(poses)
-    if depths:
+    if depths and not fairness_fastvggt_protocol:
         valid_ids &= set(depths)
     for frame_id in sorted(valid_ids):
         pose = np.loadtxt(poses[frame_id], dtype=np.float64)
@@ -118,16 +130,26 @@ def scene_records(scene_dir: Path, requested: int, require_exact: bool = False) 
             f"{scene_dir.name} has only {len(ids)} valid frames, but {requested} are required. "
             "Point --dataset-root to a full ScanNet RGB/pose extraction."
         )
-    selected = endpoint_uniform_indices(len(ids), requested)
+    selected = fastvggt_frame_indices(len(ids), requested) if fairness_fastvggt_protocol else endpoint_uniform_indices(len(ids), requested)
     records = [{"id": ids[i], "image": images[ids[i]], "depth": depths.get(ids[i])} for i in selected]
     return records, np.stack(matrices, axis=0)[selected]
 
 
-def load_fastvggt_images(paths: list[Path], target_width: int = 518) -> torch.Tensor:
+def load_fastvggt_images(paths: list[Path], target_width: int = 518,
+                         fairness_fastvggt_protocol: bool = False) -> torch.Tensor:
     """The non-square 518px-width preprocessing used by FastVGGT ScanNet."""
     tensors = []
     for path in paths:
-        image = Image.open(path).convert("RGB")
+        if fairness_fastvggt_protocol:
+            # The released evaluator decodes with OpenCV, converts BGR -> RGB,
+            # then hands the uint8 array to Pillow for bicubic resizing.
+            import cv2
+            array = cv2.imread(str(path))
+            if array is None:
+                raise RuntimeError(f"could not decode image: {path}")
+            image = Image.fromarray(cv2.cvtColor(array, cv2.COLOR_BGR2RGB), mode="RGB")
+        else:
+            image = Image.open(path).convert("RGB")
         width, height = image.size
         resized_height = round(height * (target_width / width) / 14) * 14
         image = image.resize((target_width, resized_height), Image.Resampling.BICUBIC)
@@ -142,15 +164,29 @@ def checkpoint_state(path: Path) -> dict[str, torch.Tensor]:
     return {key.replace("module.", "", 1): value for key, value in state.items()}
 
 
-def build_model(method: str, checkpoint: Path, device: torch.device) -> VGGT:
+def build_model(method: str, checkpoint: Path, device: torch.device,
+                fairness_fastvggt_protocol: bool = False) -> VGGT:
     kwargs: dict[str, Any] = {}
+    if fairness_fastvggt_protocol:
+        # All methods use the same camera/depth-only head set in the fairness
+        # experiment.  Reconstruction is depth-based, so point and track heads
+        # are neither needed nor resident in the measured GPU model.
+        kwargs.update(enable_point=False, enable_track=False)
     if method == "fastvggt":
-        kwargs.update(enable_token_merging=True, token_merging_method="spatial", token_merging_ratio=0.9)
+        if fairness_fastvggt_protocol:
+            kwargs.update(enable_token_merging=True, token_merging_method="fastvggt_reference", token_merging_ratio=0.9)
+        else:
+            kwargs.update(enable_token_merging=True, token_merging_method="spatial", token_merging_ratio=0.9)
     elif method == "selftr":
         kwargs.update(um_lambda_cost=0.04, um_spatial_radius=2, um_temporal_window=4,
                       um_policy="deltae-adaptive", um_refresh_layers="0,9,21")
     model = VGGT(**kwargs)
-    model.load_state_dict(checkpoint_state(checkpoint), strict=True)
+    incompat = model.load_state_dict(checkpoint_state(checkpoint), strict=not fairness_fastvggt_protocol)
+    if fairness_fastvggt_protocol:
+        unexpected = [key for key in incompat.unexpected_keys
+                      if not key.startswith(("point_head.", "track_head."))]
+        if incompat.missing_keys or unexpected:
+            raise RuntimeError(f"fairness checkpoint mismatch: missing={incompat.missing_keys}, unexpected={unexpected}")
     model = model.eval().to(device=device, dtype=torch.bfloat16)
     # VGGT keeps its heads in FP32 by default.  The model provides this flag
     # for the all-BF16 long-sequence inference path so the heads execute under
@@ -247,8 +283,9 @@ class Reservoir:
         return self.buffer[:self.size].copy()
 
 
-def predicted_points(depth: np.ndarray, confidence: np.ndarray, c2w: np.ndarray, intrinsic: np.ndarray,
-                     first_gt_c2w: np.ndarray, threshold: float, sampler: Reservoir) -> None:
+def predicted_point_chunks(depth: np.ndarray, confidence: np.ndarray, c2w: np.ndarray, intrinsic: np.ndarray,
+                           first_gt_c2w: np.ndarray, threshold: float):
+    """Yield valid reconstructed points in FastVGGT's frame-major pixel order."""
     for frame_depth, frame_conf, frame_c2w, frame_k in zip(depth, confidence, c2w, intrinsic):
         valid = np.isfinite(frame_depth) & np.isfinite(frame_conf) & (frame_depth > 0) & (frame_conf >= threshold)
         y, x = np.nonzero(valid)
@@ -259,7 +296,41 @@ def predicted_points(depth: np.ndarray, confidence: np.ndarray, c2w: np.ndarray,
                                (y - frame_k[1, 2]) * z / frame_k[1, 1], z, np.ones_like(z)), axis=1)
         points_local = (frame_c2w @ points_cam.T).T[:, :3]
         points_global = (first_gt_c2w @ np.c_[points_local, np.ones(len(points_local))].T).T[:, :3]
-        sampler.add(points_global)
+        yield np.asarray(points_global, dtype=np.float32)
+
+
+def reservoir_points(depth: np.ndarray, confidence: np.ndarray, c2w: np.ndarray, intrinsic: np.ndarray,
+                     first_gt_c2w: np.ndarray, threshold: float, capacity: int) -> np.ndarray:
+    sampler = Reservoir(capacity)
+    for points in predicted_point_chunks(depth, confidence, c2w, intrinsic, first_gt_c2w, threshold):
+        sampler.add(points)
+    return sampler.value()
+
+
+def fastvggt_sample_points(depth: np.ndarray, confidence: np.ndarray, c2w: np.ndarray, intrinsic: np.ndarray,
+                           first_gt_c2w: np.ndarray, threshold: float, capacity: int) -> np.ndarray:
+    """Replicate FastVGGT's concat-then-``np.random.choice`` point sample without a giant concat."""
+    counts = [len(points) for points in predicted_point_chunks(depth, confidence, c2w, intrinsic, first_gt_c2w, threshold)]
+    total = sum(counts)
+    if total < 10:
+        raise RuntimeError("too few reconstruction points")
+    if total <= capacity:
+        return np.concatenate(list(predicted_point_chunks(depth, confidence, c2w, intrinsic, first_gt_c2w, threshold)), axis=0)
+    # np.random.RandomState(33).choice has the same sequence as the released
+    # code's np.random.seed(33); np.random.choice(...), including point order.
+    selected = np.random.RandomState(33).choice(total, capacity, replace=False)
+    sorted_positions = np.argsort(selected)
+    sorted_selected = selected[sorted_positions]
+    sampled = np.empty((capacity, 3), dtype=np.float32)
+    start = 0
+    for count, points in zip(counts, predicted_point_chunks(depth, confidence, c2w, intrinsic, first_gt_c2w, threshold)):
+        stop = start + count
+        left, right = np.searchsorted(sorted_selected, (start, stop), side="left")
+        if right > left:
+            source_indices = sorted_selected[left:right] - start
+            sampled[sorted_positions[left:right]] = points[source_indices]
+        start = stop
+    return sampled
 
 
 def bbox_scale_align(prediction: np.ndarray, target: np.ndarray) -> np.ndarray:
@@ -307,6 +378,27 @@ def reconstruction_metrics(prediction: np.ndarray, gt_path: Path, voxel: float, 
         "pred_points_after_voxel": int(len(pred_cloud.points)), "gt_points_after_voxel": int(len(gt_cloud.points)),
     }
     return metrics, np.asarray(pred_cloud.points), np.asarray(gt_cloud.points)
+
+
+def fastvggt_reconstruction_metrics(prediction: np.ndarray, gt_path: Path, voxel: float,
+                                    max_distance: float) -> dict[str, float]:
+    """Released FastVGGT ScanNet CD: independent 100k samples, bbox scale, 5cm voxel, clipped sum."""
+    target = np.asarray(o3d.io.read_point_cloud(str(gt_path)).points, dtype=np.float32)
+    if len(prediction) < 10 or len(target) < 10:
+        raise RuntimeError("too few reconstruction points")
+    if len(prediction) > 100000:
+        prediction = prediction[np.random.RandomState(33).choice(len(prediction), 100000, replace=False)]
+    if len(target) > 100000:
+        target = target[np.random.RandomState(33).choice(len(target), 100000, replace=False)]
+    prediction = bbox_scale_align(prediction, target)
+    pred_cloud = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(prediction)).voxel_down_sample(voxel)
+    gt_cloud = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(target)).voxel_down_sample(voxel)
+    acc = np.clip(np.asarray(pred_cloud.compute_point_cloud_distance(gt_cloud)), 0, max_distance)
+    comp = np.clip(np.asarray(gt_cloud.compute_point_cloud_distance(pred_cloud)), 0, max_distance)
+    return {"acc_m": float(acc.mean()), "comp_m": float(comp.mean()),
+            "cd_m": float(acc.mean() + comp.mean()),
+            "pred_points_after_voxel": int(len(pred_cloud.points)),
+            "gt_points_after_voxel": int(len(gt_cloud.points))}
 
 
 def visual_sample(points: np.ndarray, limit: int = 15000) -> np.ndarray:
@@ -514,18 +606,29 @@ def numeric_mean(items: list[dict[str, Any]]) -> dict[str, float]:
 
 def evaluate_scene(model: VGGT, scene: str, records: list[dict[str, Any]], gt_c2w: np.ndarray, gt_root: Path,
                    args: argparse.Namespace, device: torch.device) -> dict[str, Any]:
-    images = load_fastvggt_images([record["image"] for record in records])
+    images = load_fastvggt_images(
+        [record["image"] for record in records], fairness_fastvggt_protocol=args.fairness_fastvggt_protocol
+    )
     prediction, latency_s, allocated_gib, reserved_gib = forward(model, images, device)
     h, w = images.shape[-2:]
     pred_c2w, intrinsic = c2w_and_intrinsics(prediction["pose_enc"], (h, w))
     depth = prediction["depth"].float().detach().cpu().numpy()[0, ..., 0]
     confidence = prediction["depth_conf"].float().detach().cpu().numpy()[0]
-    sampler = Reservoir(args.point_sample_limit)
-    predicted_points(depth, confidence, pred_c2w, intrinsic, gt_c2w[0], args.depth_confidence_threshold, sampler)
     gt_ply = gt_root / scene / f"{scene}_vh_clean_2.ply"
     if not gt_ply.exists():
         raise FileNotFoundError(gt_ply)
-    geometry, pred_cloud, gt_cloud = reconstruction_metrics(sampler.value(), gt_ply, args.voxel_size, args.chamfer_max_distance, args.tau)
+    reference_points = reservoir_points(
+        depth, confidence, pred_c2w, intrinsic, gt_c2w[0], args.depth_confidence_threshold, args.point_sample_limit
+    )
+    geometry, pred_cloud, gt_cloud = reconstruction_metrics(
+        reference_points, gt_ply, args.voxel_size, args.chamfer_max_distance, args.tau
+    )
+    released_fastvggt_points = fastvggt_sample_points(
+        depth, confidence, pred_c2w, intrinsic, gt_c2w[0], args.depth_confidence_threshold, args.point_sample_limit
+    )
+    fastvggt_geometry = fastvggt_reconstruction_metrics(
+        released_fastvggt_points, gt_ply, args.voxel_size, args.chamfer_max_distance
+    )
     pose, aligned_c2w, local_gt_c2w = pose_metrics(pred_c2w, gt_c2w)
     fast_pose = fastvggt_trajectory_metrics(pred_c2w, gt_c2w)
     depth_result = depth_metrics(depth, records)
@@ -540,12 +643,14 @@ def evaluate_scene(model: VGGT, scene: str, records: list[dict[str, Any]], gt_c2
             "trajectory_png": str(visualization_dir / "trajectory_xz.png"),
         }
     result = {"scene": scene, "frames": len(records), "frame_ids": [item["id"] for item in records],
-              "pose": pose, "fastvggt_pose": fast_pose, "reconstruction": geometry, "depth": depth_result,
+              "pose": pose, "fastvggt_pose": fast_pose,
+              "reconstruction": geometry, "fastvggt_reconstruction": fastvggt_geometry, "depth": depth_result,
               "visualization": visualization,
               "efficiency": {"latency_s": latency_s, "inference_time_s": latency_s, "fps": len(records) / latency_s,
                              "peak_vram_allocated_gib": allocated_gib, "peak_vram_reserved_gib": reserved_gib,
                              "token_retention": token_retention(model, args.method),
-                             "sampled_reconstruction_points": int(len(sampler.value()))}}
+                             "sampled_reconstruction_points": int(len(reference_points)),
+                             "fastvggt_sampled_reconstruction_points": int(len(released_fastvggt_points))}}
     del prediction
     torch.cuda.empty_cache()
     return result
@@ -575,7 +680,11 @@ def main() -> None:
     parser.add_argument("--tau", type=float, default=0.05)
     parser.add_argument("--save-visualizations", action="store_true",
                         help="save coloured reconstruction PLY/PNG and FastVGGT-style aligned trajectory PNG")
+    parser.add_argument("--fairness-fastvggt-protocol", action="store_true",
+                        help="fairness-only: use released FastVGGT RGB/pose frame selection for every method; does not change the default main protocol")
     args = parser.parse_args()
+    if args.fairness_fastvggt_protocol and args.point_sample_limit != 100000:
+        raise ValueError("the released FastVGGT fairness protocol fixes --point-sample-limit to 100000")
     if not torch.cuda.is_available():
         raise RuntimeError("ScanNet50 evaluation requires CUDA")
     if not args.checkpoint.is_file():
@@ -600,14 +709,18 @@ def main() -> None:
     if args.max_scenes:
         scenes = scenes[:args.max_scenes]
     device = torch.device(args.device)
-    model = build_model(args.method, args.checkpoint, device)
+    model = build_model(args.method, args.checkpoint, device, args.fairness_fastvggt_protocol)
     if args.method == "selftr":
         backend = "triton_fused" if warmup_selftr_um_kernel(model, device) else "pytorch"
         print(f"SelfTR edge-cost backend: {backend}", flush=True)
-    protocol = {"sampler": "endpoint-preserving uniform: first and last valid RGB/pose/depth frames + uniform interior",
+    protocol = {"experiment_kind": "fairness" if args.fairness_fastvggt_protocol else "main",
+                "sampler": ("released FastVGGT: first valid RGB/pose frame then integer-stride selection from remaining valid RGB/pose frames, truncated at N"
+                            if args.fairness_fastvggt_protocol else
+                            "endpoint-preserving uniform: first and last valid RGB/pose/depth frames + uniform interior"),
                 "image_preprocessing": "FastVGGT ScanNet: width=518, aspect-preserving height rounded to a multiple of 14",
-                "geometry": "FastVGGT coordinate recovery + bbox scale alignment; deterministic 100k streaming sample; 0.05m voxel",
-                "cd_m": "FastVGGT-compatible clipped bidirectional sum Acc+Comp (clip=0.5m)",
+                "reconstruction": "project reference: deterministic 100k reservoir sample + bbox scale alignment + 0.05m voxel",
+                "fastvggt_reconstruction": "released FastVGGT: concat-order-equivalent deterministic 100k choice + bbox scale alignment + 0.05m voxel",
+                "cd_m": "both paths report clipped bidirectional sum Acc+Comp (clip=0.5m) independently",
                 "overall_m": "(Acc+Comp)/2", "tau_m": args.tau,
                 "pose_note": "AUC@330 is reported as AUC@30; RPW-trans is reported as RPE-trans.",
                 "fastvggt_pose": "FastVGGT EVO APE/RPE calls with Sim(3) alignment; EVO>=1.36 omits the source's incompatible align_origin=True flag.",
@@ -622,7 +735,10 @@ def main() -> None:
             continue
         print(f"[{number}/{len(scenes)}] {scene}: evaluating", flush=True)
         try:
-            records, gt_c2w = scene_records(frames_root / scene, args.num_frames, args.require_exact_frames)
+            records, gt_c2w = scene_records(
+                frames_root / scene, args.num_frames, args.require_exact_frames,
+                fairness_fastvggt_protocol=args.fairness_fastvggt_protocol,
+            )
             result = evaluate_scene(model, scene, records, gt_c2w, gt_root, args, device)
             write_json(scene_output, result)
             # A resumed experiment may replace an earlier failed attempt.
@@ -641,6 +757,7 @@ def main() -> None:
                "mean_pose": numeric_mean([item["pose"] for item in results]),
                "mean_fastvggt_pose": numeric_mean([item["fastvggt_pose"] for item in results]),
                "mean_reconstruction": numeric_mean([item["reconstruction"] for item in results]),
+               "mean_fastvggt_reconstruction": numeric_mean([item.get("fastvggt_reconstruction", {}) for item in results]),
                "mean_depth": numeric_mean([item["depth"] for item in results]),
                "mean_efficiency": numeric_mean([item["efficiency"] for item in results])}
     token_values = [item["efficiency"]["token_retention"] for item in results]

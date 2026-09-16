@@ -19,6 +19,7 @@ from vggt.models.acceleration import (
     FrameMergeState,
     build_fastvggt_plan,
     fastvggt_attention,
+    fastvggt_reference_attention,
     merge_frames,
     parse_block_indices,
     parse_layer_ratio_schedule,
@@ -460,7 +461,7 @@ class Aggregator(nn.Module):
             merge_ratio = self._layer_merge_ratios.get(block_idx, self.token_merging_ratio)
             use_fast_merge = (
                 self.enable_token_merging
-                and self.token_merging_method in {"spatial", "frame_persistent_spatial"}
+                and self.token_merging_method in {"spatial", "frame_persistent_spatial", "fastvggt_reference"}
                 and merge_ratio > 0.0
             )
             use_um = self.um_lambda_cost is not None
@@ -499,26 +500,40 @@ class Aggregator(nn.Module):
                 })
                 tokens = tokens.view(B, S, P, C)
             elif use_fast_merge:
-                plan = build_fastvggt_plan(
-                    self.global_blocks[block_idx].norm1(tokens),
-                    num_frames=S,
-                    patch_start=self.patch_start_idx,
-                    grid_size=patch_grid_size,
-                    merge_ratio=merge_ratio,
-                )
-                residual = fastvggt_attention(self.global_blocks[block_idx].attn, self.global_blocks[block_idx].norm1(tokens), pos, plan)
+                normalized = self.global_blocks[block_idx].norm1(tokens)
+                if self.token_merging_method == "fastvggt_reference":
+                    residual = fastvggt_reference_attention(
+                        self.global_blocks[block_idx].attn, normalized, pos,
+                        patch_width=patch_grid_size[1], patch_height=patch_grid_size[0], merge_ratio=merge_ratio,
+                    )
+                    active_tokens = int(getattr(self.global_blocks[block_idx].attn, "_fastvggt_reference_active_tokens", S * P))
+                    self.last_token_merging_stats.append(
+                        {"block": block_idx, "original_tokens": int(S * P), "active_tokens": active_tokens,
+                         "full_attention_token_ratio": active_tokens / float(S * P),
+                         "merged_away_token_ratio": 1.0 - active_tokens / float(S * P),
+                         "implementation": "fastvggt_reference"}
+                    )
+                else:
+                    plan = build_fastvggt_plan(
+                        normalized,
+                        num_frames=S,
+                        patch_start=self.patch_start_idx,
+                        grid_size=patch_grid_size,
+                        merge_ratio=merge_ratio,
+                    )
+                    residual = fastvggt_attention(self.global_blocks[block_idx].attn, normalized, pos, plan)
+                    if plan is not None:
+                        self.last_token_merging_stats.append(
+                            {
+                                "block": block_idx,
+                                "original_tokens": plan.original_tokens,
+                                "active_tokens": plan.active_tokens,
+                                "full_attention_token_ratio": plan.active_tokens / plan.original_tokens,
+                                "merged_away_token_ratio": 1.0 - plan.active_tokens / plan.original_tokens,
+                            }
+                        )
                 tokens = tokens + self.global_blocks[block_idx].ls1(residual)
                 tokens = tokens + self.global_blocks[block_idx].ls2(self.global_blocks[block_idx].mlp(self.global_blocks[block_idx].norm2(tokens)))
-                if plan is not None:
-                    self.last_token_merging_stats.append(
-                        {
-                            "block": block_idx,
-                            "original_tokens": plan.original_tokens,
-                            "active_tokens": plan.active_tokens,
-                            "full_attention_token_ratio": plan.active_tokens / plan.original_tokens,
-                            "merged_away_token_ratio": 1.0 - plan.active_tokens / plan.original_tokens,
-                        }
-                    )
                 tokens = tokens.view(B, S, P, C)
             elif self.training:
                 tokens = checkpoint(self.global_blocks[global_idx], tokens, pos, use_reentrant=self.use_reentrant)

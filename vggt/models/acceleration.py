@@ -429,3 +429,152 @@ def fastvggt_attention(attention, x: torch.Tensor, pos: torch.Tensor | None, pla
     restored[:, plan.src_indices[plan.merged_sources[0]]] = merged_values
     restored[:, plan.protected_indices] = output[:, kept_count + dst_count :]
     return restored
+
+
+def _fastvggt_reference_similarity_chunks(
+    source: torch.Tensor, destination_transposed: torch.Tensor, chunk_size: int
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """The BF16 chunked similarity kernel used by the released FastVGGT code."""
+    batch, source_count, _ = source.shape
+    output_dtype = source.dtype
+    source_bf16 = source.to(torch.bfloat16)
+    destination_bf16 = destination_transposed.to(torch.bfloat16)
+    values = torch.empty(batch, source_count, device=source.device, dtype=output_dtype)
+    indices = torch.empty(batch, source_count, device=source.device, dtype=torch.long)
+    for start in range(0, source_count, chunk_size):
+        end = min(start + chunk_size, source_count)
+        maxima, argmax = torch.max(torch.bmm(source_bf16[:, start:end], destination_bf16), dim=2)
+        values[:, start:end] = maxima.to(output_dtype)
+        indices[:, start:end] = argmax
+    return values, indices
+
+
+def _fastvggt_reference_bipartite_merge(
+    metric: torch.Tensor,
+    width: int,
+    height: int,
+    remove_count: int,
+    generator: torch.Generator,
+) -> tuple:
+    """Faithful in-tree copy of FastVGGT's protected 2x2 bipartite merge.
+
+    Keeping it separate from the optimized local merge path is intentional:
+    this function is selected only by the fairness protocol, where matching the
+    released FastVGGT token ordering and RNG layout matters more than speed.
+    """
+    batch, token_count, _ = metric.shape
+    if remove_count <= 0:
+        return (lambda x, **_: x), (lambda x: x), token_count
+    tokens_per_image = width * height + 5
+    image_count = token_count // tokens_per_image
+    if image_count * tokens_per_image != token_count:
+        raise ValueError("FastVGGT reference merge received an invalid token layout")
+    device = metric.device
+    protected_count = int(token_count * 0.1)
+    protected_indices = torch.arange(0, token_count, max(1, token_count // max(protected_count, 1)), device=device)[:protected_count]
+
+    # This layout and randint shape deliberately match merging/merge.py in the
+    # reference repository; changing their order changes the deterministic map.
+    labels = torch.zeros(token_count, device=device, dtype=torch.int64)
+    labels[:tokens_per_image] = -1
+    if image_count > 1:
+        specials = torch.arange(1, image_count, device=device)[:, None] * tokens_per_image + torch.arange(5, device=device)
+        labels[specials.flatten()] = -1
+        blocks_h, blocks_w = height // 2, width // 2
+        effective_h, effective_w = blocks_h * 2, blocks_w * 2
+        random_cells = torch.randint(4, (image_count - 1, blocks_h, blocks_w), device=device, generator=generator)
+        cell_labels = torch.zeros(image_count - 1, blocks_h, blocks_w, 4, device=device, dtype=torch.int64)
+        cell_labels.scatter_(3, random_cells.unsqueeze(-1), -torch.ones_like(random_cells).unsqueeze(-1))
+        cell_labels = cell_labels.view(image_count - 1, blocks_h, blocks_w, 2, 2).transpose(2, 3).reshape(image_count - 1, effective_h, effective_w)
+        for image_index in range(image_count - 1):
+            start = (image_index + 1) * tokens_per_image + 5
+            labels[start:start + effective_h * effective_w] = cell_labels[image_index, :effective_h, :effective_w].flatten()
+
+    ordering = labels.reshape(1, -1, 1).argsort(dim=1)
+    destination_count = int((labels == -1).sum())
+    source_indices, destination_indices = ordering[:, destination_count:], ordering[:, :destination_count]
+    source_count = source_indices.shape[1]
+    protected_indices_3d = protected_indices.unsqueeze(0).unsqueeze(-1)
+
+    def split(values: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        channels = values.shape[-1]
+        return (
+            torch.gather(values, 1, source_indices.expand(batch, source_count, channels)),
+            torch.gather(values, 1, destination_indices.expand(batch, destination_count, channels)),
+            torch.gather(values, 1, protected_indices_3d.expand(batch, protected_indices.numel(), channels)),
+        )
+
+    with torch.no_grad():
+        source_metric, destination_metric, _ = split(metric / metric.norm(dim=-1, keepdim=True))
+        scores, destination_for_source = _fastvggt_reference_similarity_chunks(
+            source_metric, destination_metric.transpose(-1, -2), min(5000, source_count)
+        )
+        ranked = scores.argsort(dim=-1, descending=True)[..., None][0, :, 0]
+        protected_source = torch.isin(source_indices[0, :, 0], protected_indices)
+        ranked = ranked[~protected_source[ranked]]
+        merged_count = min(min(source_count, remove_count), ranked.numel())
+        merged_source = ranked[:merged_count].unsqueeze(0).unsqueeze(-1)
+        unmerged_source = ranked[merged_count:].unsqueeze(0).unsqueeze(-1)
+        destination_for_merged = torch.gather(destination_for_source[..., None], 1, merged_source)
+
+    def merge(values: torch.Tensor, *, mode: str = "mean", extra_tensors=None, extra_tensors_2=None):
+        source, destination, protected = split(values)
+        channels = values.shape[-1]
+        unmerged = torch.gather(source, 1, unmerged_source.expand(batch, unmerged_source.shape[1], channels))
+        merged = torch.gather(source, 1, merged_source.expand(batch, merged_source.shape[1], channels))
+        destination = destination.scatter_reduce(1, destination_for_merged.expand(batch, merged_source.shape[1], channels), merged, reduce=mode)
+        outputs = [torch.cat([unmerged, destination, protected], dim=1)]
+        for extra in (extra_tensors, extra_tensors_2):
+            if extra is None:
+                continue
+            extra_source, extra_destination, extra_protected = split(extra)
+            extra_channels = extra.shape[-1]
+            extra_unmerged = torch.gather(extra_source, 1, unmerged_source.expand(batch, unmerged_source.shape[1], extra_channels))
+            extra_merged = torch.gather(extra_source, 1, merged_source.expand(batch, merged_source.shape[1], extra_channels))
+            extra_destination = extra_destination.scatter_reduce(1, destination_for_merged.expand(batch, merged_source.shape[1], extra_channels), extra_merged, reduce=mode)
+            outputs.append(torch.cat([extra_unmerged, extra_destination, extra_protected], dim=1))
+        return tuple(outputs) if len(outputs) > 1 else outputs[0]
+
+    def unmerge(values: torch.Tensor) -> torch.Tensor:
+        channels = values.shape[-1]
+        unmerged_count = unmerged_source.shape[1]
+        unmerged = values[:, :unmerged_count]
+        destination = values[:, unmerged_count:unmerged_count + destination_count]
+        protected = values[:, unmerged_count + destination_count:unmerged_count + destination_count + protected_indices.numel()]
+        restored_merged = torch.gather(destination, 1, destination_for_merged.expand(batch, merged_source.shape[1], channels))
+        output = torch.zeros(batch, token_count, channels, device=values.device, dtype=values.dtype)
+        output.scatter_(1, destination_indices.expand(batch, destination_count, channels), destination)
+        output.scatter_(1, torch.gather(source_indices.expand(batch, source_count, 1), 1, unmerged_source).expand(batch, unmerged_count, channels), unmerged)
+        output.scatter_(1, torch.gather(source_indices.expand(batch, source_count, 1), 1, merged_source).expand(batch, merged_source.shape[1], channels), restored_merged)
+        output.scatter_(1, protected_indices_3d.expand(batch, protected_indices.numel(), channels), protected)
+        return output
+
+    active_count = int(unmerged_source.shape[1] + destination_count + protected_indices.numel())
+    return merge, unmerge, active_count
+
+
+def fastvggt_reference_attention(
+    attention, x: torch.Tensor, pos: torch.Tensor | None, *, patch_width: int, patch_height: int, merge_ratio: float
+) -> torch.Tensor:
+    """Run the original FastVGGT attention merge/unmerge sequence exactly."""
+    batch, token_count, channels = x.shape
+    qkv = attention.qkv(x).reshape(batch, token_count, 3, attention.num_heads, attention.head_dim).permute(2, 0, 3, 1, 4)
+    query, key, value = attention.q_norm(qkv[0]), attention.k_norm(qkv[1]), qkv[2]
+    if attention.rope is not None:
+        query, key = attention.rope(query, pos), attention.rope(key, pos)
+    generator = torch.Generator(device=x.device)
+    generator.manual_seed(33)
+    merge, unmerge, active_count = _fastvggt_reference_bipartite_merge(
+        x, patch_width, patch_height, int(token_count * merge_ratio), generator
+    )
+    query_in = query.permute(0, 2, 1, 3).reshape(batch, token_count, channels)
+    key_in = key.permute(0, 2, 1, 3).reshape(batch, token_count, channels)
+    value_in = value.permute(0, 2, 1, 3).reshape(batch, token_count, channels)
+    query_out, key_out, value_out = merge(query_in, mode="mean", extra_tensors=key_in, extra_tensors_2=value_in)
+    query = query_out.reshape(batch, -1, attention.num_heads, attention.head_dim).permute(0, 2, 1, 3)
+    key = key_out.reshape(batch, -1, attention.num_heads, attention.head_dim).permute(0, 2, 1, 3)
+    value = value_out.reshape(batch, -1, attention.num_heads, attention.head_dim).permute(0, 2, 1, 3)
+    output = F.scaled_dot_product_attention(query, key, value, dropout_p=attention.attn_drop.p if attention.training else 0.0)
+    output = attention.proj_drop(attention.proj(output.transpose(1, 2).reshape(batch, -1, channels)))
+    attention._fastvggt_reference_active_tokens = active_count
+    return unmerge(output)
