@@ -4,7 +4,12 @@
     "protocol": "project main protocol (legacy, pre-fastvggt_fairness_v3)",
     "methods": {
       "densevggt": {
+        "reconstruction.acc_m": 0.20675266728744734,
+        "reconstruction.comp_m": 0.21932521113899817,
+        "reconstruction.overall_m": 0.21303893921322276,
         "reconstruction.cd_m": 0.4260778784264455,
+        "reconstruction.precision_at_0.05m": 0.11629822436439366,
+        "reconstruction.recall_at_0.05m": 0.10151263650104694,
         "reconstruction.f1_at_0.05m": 0.10586154507632445,
         "reconstruction.nc": 0.6444642077708957,
         "fastvggt_pose.fastvggt_ate_m": 0.1329298073288471,
@@ -16,7 +21,12 @@
         "efficiency.peak_vram_allocated_gib": 9.569180965423584
       },
       "fastvggt": {
+        "reconstruction.acc_m": 0.18522101548588216,
+        "reconstruction.comp_m": 0.2057416903995023,
+        "reconstruction.overall_m": 0.19548135294269223,
         "reconstruction.cd_m": 0.39096270588538445,
+        "reconstruction.precision_at_0.05m": 0.12383887883954547,
+        "reconstruction.recall_at_0.05m": 0.11227455372805134,
         "reconstruction.f1_at_0.05m": 0.11551824211757716,
         "reconstruction.nc": 0.6758998541365346,
         "fastvggt_pose.fastvggt_ate_m": 0.1003661871811308,
@@ -28,7 +38,12 @@
         "efficiency.peak_vram_allocated_gib": 10.304619312286377
       },
       "selftr": {
+        "reconstruction.acc_m": 0.2120876332572345,
+        "reconstruction.comp_m": 0.2321755611278139,
+        "reconstruction.overall_m": 0.22213159719252418,
         "reconstruction.cd_m": 0.44426319438504835,
+        "reconstruction.precision_at_0.05m": 0.11342423437693647,
+        "reconstruction.recall_at_0.05m": 0.09723180703002704,
         "reconstruction.f1_at_0.05m": 0.10251106643867394,
         "reconstruction.nc": 0.6378269388214737,
         "fastvggt_pose.fastvggt_ate_m": 0.11845260664693963,

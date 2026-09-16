@@ -11,30 +11,35 @@ from typing import Any
 
 METHODS = ("densevggt", "fastvggt", "selftr")
 SCENES = ("scene0000_00", "scene0013_02")
-ACTUAL_METRICS = {
-    "CD (FastVGGT pipeline, m)": ("fastvggt_reconstruction", "cd_m"),
-    "F1@5cm (FastVGGT pipeline)": ("fastvggt_reconstruction", "f1_at_0.05m"),
-    "NC (FastVGGT pipeline)": ("fastvggt_reconstruction", "nc"),
-    "ATE (FastVGGT, m)": ("fastvggt_pose", "fastvggt_ate_m"),
-    "ARE (FastVGGT, deg)": ("fastvggt_pose", "fastvggt_are_deg"),
-    "RPE-rot (FastVGGT, deg)": ("fastvggt_pose", "fastvggt_rpe_rot_deg"),
-    "RPE-trans (FastVGGT, m)": ("fastvggt_pose", "fastvggt_rpe_trans_m"),
-    "Latency (model-only, s)": ("efficiency", "latency_s"),
-    "FPS (model-only)": ("efficiency", "fps"),
-    "VRAM allocated (GiB)": ("efficiency", "peak_vram_allocated_gib"),
-}
-LOCAL_FIELD_MAP = {
-    "CD (FastVGGT pipeline, m)": "reconstruction.cd_m",
-    "F1@5cm (FastVGGT pipeline)": "reconstruction.f1_at_0.05m",
-    "NC (FastVGGT pipeline)": "reconstruction.nc",
-    "ATE (FastVGGT, m)": "fastvggt_pose.fastvggt_ate_m",
-    "ARE (FastVGGT, deg)": "fastvggt_pose.fastvggt_are_deg",
-    "RPE-rot (FastVGGT, deg)": "fastvggt_pose.fastvggt_rpe_rot_deg",
-    "RPE-trans (FastVGGT, m)": "fastvggt_pose.fastvggt_rpe_trans_m",
-    "Latency (model-only, s)": "efficiency.latency_s",
-    "FPS (model-only)": "efficiency.fps",
-    "VRAM allocated (GiB)": "efficiency.peak_vram_allocated_gib",
-}
+# Each row names one protocol explicitly.  A local reference is shown only for
+# the project reconstruction path, because the historical run predates the
+# FastVGGT full-cloud evaluator.  The paper publishes only its FastVGGT-path CD
+# and timing values for the 100-frame ScanNet-50 table.
+METRICS = (
+    ("Project Acc (m)", "reconstruction", "acc_m", "reconstruction.acc_m", None),
+    ("Project Comp (m)", "reconstruction", "comp_m", "reconstruction.comp_m", None),
+    ("Project Overall (m)", "reconstruction", "overall_m", "reconstruction.overall_m", None),
+    ("Project CD (m)", "reconstruction", "cd_m", "reconstruction.cd_m", None),
+    ("Project Precision@5cm", "reconstruction", "precision_at_0.05m", "reconstruction.precision_at_0.05m", None),
+    ("Project Recall@5cm", "reconstruction", "recall_at_0.05m", "reconstruction.recall_at_0.05m", None),
+    ("Project F1@5cm", "reconstruction", "f1_at_0.05m", "reconstruction.f1_at_0.05m", None),
+    ("Project NC", "reconstruction", "nc", "reconstruction.nc", None),
+    ("FastVGGT Acc (m)", "fastvggt_reconstruction", "acc_m", None, None),
+    ("FastVGGT Comp (m)", "fastvggt_reconstruction", "comp_m", None, None),
+    ("FastVGGT Overall (m)", "fastvggt_reconstruction", "overall_m", None, None),
+    ("FastVGGT CD (m)", "fastvggt_reconstruction", "cd_m", None, "CD (FastVGGT pipeline, m)"),
+    ("FastVGGT Precision@5cm", "fastvggt_reconstruction", "precision_at_0.05m", None, None),
+    ("FastVGGT Recall@5cm", "fastvggt_reconstruction", "recall_at_0.05m", None, None),
+    ("FastVGGT F1@5cm", "fastvggt_reconstruction", "f1_at_0.05m", None, None),
+    ("FastVGGT NC", "fastvggt_reconstruction", "nc", None, None),
+    ("ATE (FastVGGT, m)", "fastvggt_pose", "fastvggt_ate_m", "fastvggt_pose.fastvggt_ate_m", None),
+    ("ARE (FastVGGT, deg)", "fastvggt_pose", "fastvggt_are_deg", "fastvggt_pose.fastvggt_are_deg", None),
+    ("RPE-rot (FastVGGT, deg)", "fastvggt_pose", "fastvggt_rpe_rot_deg", "fastvggt_pose.fastvggt_rpe_rot_deg", None),
+    ("RPE-trans (FastVGGT, m)", "fastvggt_pose", "fastvggt_rpe_trans_m", "fastvggt_pose.fastvggt_rpe_trans_m", None),
+    ("Latency (model-only, s)", "efficiency", "latency_s", "efficiency.latency_s", "Latency (model-only, s)"),
+    ("FPS (model-only)", "efficiency", "fps", "efficiency.fps", None),
+    ("VRAM allocated (GiB)", "efficiency", "peak_vram_allocated_gib", "efficiency.peak_vram_allocated_gib", None),
+)
 
 
 def mean(items: list[float]) -> float:
@@ -73,25 +78,25 @@ def main() -> None:
             if item.get("scene") != scene or item.get("method") != method:
                 raise RuntimeError(f"{path} has incompatible scene/method metadata")
             results.append(item)
-        actual[method] = {
-            name: mean([metric_value(item, *source) for item in results])
-            for name, source in ACTUAL_METRICS.items()
-        }
+        actual[method] = {name: mean([metric_value(item, section, field) for item in results])
+                          for name, section, field, _, _ in METRICS}
 
     rows = []
     lines = [
         "# ScanNet-50 fairness smoke test (100 frames, two scenes)", "",
         "Scenes: `scene0000_00`, `scene0013_02`. Actual values are arithmetic means over these two scenes.", "",
-        "The **local reference** is a historical two-scene local run using the older main-protocol evaluator, so it is diagnostic only—not a numerical pass/fail target for the current FastVGGT fairness protocol.",
-        "The **FastVGGT paper reference** is the published ScanNet-50 mean over 50 scenes; it is reported only for DenseVGGT and FastVGGT and likewise is not directly comparable to a two-scene smoke test.", "",
+        "Both reconstruction protocols are reported separately: `Project` uses this repository's reservoir/bbox/voxel route, while `FastVGGT` uses full-cloud bbox alignment followed by FastVGGT's deterministic 100k sample and voxelization.",
+        "The local historical reference is populated only for the Project protocol and pose/efficiency fields. The paper reference is populated only for the published FastVGGT CD and latency. Blank cells mean that no same-protocol reference exists.",
+        "The local and paper references remain diagnostic rather than pass/fail thresholds because the current run is a two-scene fairness smoke test.", "",
     ]
     for method in METHODS:
         lines.extend([f"## {method}", "", "| Metric | Actual fairness | Local historical reference | Δ actual−local | FastVGGT paper reference | Δ actual−paper |", "|---|---:|---:|---:|---:|---:|"])
         local = reference["local_historical"]["methods"].get(method, {})
         paper = reference["fastvggt_paper"]["methods"].get(method, {})
-        for metric, value in actual[method].items():
-            local_value = local.get(LOCAL_FIELD_MAP[metric])
-            paper_value = paper.get(metric)
+        for metric, _, _, local_key, paper_key in METRICS:
+            value = actual[method][metric]
+            local_value = None if local_key is None else local.get(local_key)
+            paper_value = None if paper_key is None else paper.get(paper_key)
             row = {
                 "method": method, "metric": metric, "actual": value,
                 "local_reference": local_value, "paper_reference": paper_value,

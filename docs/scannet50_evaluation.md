@@ -87,9 +87,10 @@ This fairness smoke test evaluates `scene0000_00` and `scene0013_02`, each at
 provided GPU list. Because this smoke test has only two scenes, at most two
 GPUs can be busy; the formal 50-scene runners distribute all scenes over every
 provided GPU. It writes
-`smoke_comparison.md` and `smoke_comparison.json`, containing the measured
-two-scene mean along with the repository's historical local diagnostic values
-and the FastVGGT paper's published 50-scene CD/latency values.  Those external
+`smoke_comparison.md` and `smoke_comparison.json`. The report keeps project
+and FastVGGT reconstruction metrics in separate rows: project metrics are
+compared only with the local project-protocol history, and FastVGGT-path CD is
+shown alongside the FastVGGT paper's published 50-scene CD/latency values. Those external
 references use different protocol scopes and are deliberately not treated as
 pass/fail thresholds.
 
