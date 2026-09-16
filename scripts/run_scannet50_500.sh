@@ -1,21 +1,14 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-# Usage: bash scripts/run_scannet50_500.sh /path/to/vggt_checkpoint.pt [output_root]
+# Compatibility entry point: execute the 500-frame FastVGGT fairness protocol.
+# SCANNET_GT_ROOT is required when the complete frame pool and ScanNet meshes
+# reside in separate locations.
 CHECKPOINT=${1:?"usage: $0 CHECKPOINT [OUTPUT_ROOT]"}
-OUTPUT_ROOT=${2:-outputs/scannet50_500}
-SCANNET_DATA_ROOT=${SCANNET_DATA_ROOT:?"set SCANNET_DATA_ROOT to a complete ScanNet extraction (the 300-frame cache is rejected)"}
-DENSE_GPU=${DENSE_GPU:-4}
-FAST_GPU=${FAST_GPU:-5}
-SELFTR_GPU=${SELFTR_GPU:-6}
-PYTHON_BIN=${EVAL_PYTHON:-/data/mmc_syang/miniconda3/envs/fastvggt/bin/python}
-[[ -x "$PYTHON_BIN" ]] || PYTHON_BIN=python
-COMMON=(--checkpoint "$CHECKPOINT" --dataset-root "$SCANNET_DATA_ROOT" --num-frames 500 --require-exact-frames --save-visualizations --resume)
-
-CUDA_VISIBLE_DEVICES=$DENSE_GPU "$PYTHON_BIN" scripts/eval_scannet50.py --method densevggt --device cuda:0 --output-dir "$OUTPUT_ROOT/densevggt" "${COMMON[@]}" &
-PID_DENSE=$!
-CUDA_VISIBLE_DEVICES=$FAST_GPU "$PYTHON_BIN" scripts/eval_scannet50.py --method fastvggt --device cuda:0 --output-dir "$OUTPUT_ROOT/fastvggt" "${COMMON[@]}" &
-PID_FAST=$!
-CUDA_VISIBLE_DEVICES=$SELFTR_GPU "$PYTHON_BIN" scripts/eval_scannet50.py --method selftr --device cuda:0 --output-dir "$OUTPUT_ROOT/selftr" "${COMMON[@]}" &
-PID_SELFTR=$!
-wait "$PID_DENSE" "$PID_FAST" "$PID_SELFTR"
+OUTPUT_ROOT=${2:-outputs/scannet50_fairness_v3}
+SCANNET_DATA_ROOT=${SCANNET_DATA_ROOT:?"set SCANNET_DATA_ROOT to the complete ScanNet frame extraction"}
+SCANNET_GT_ROOT=${SCANNET_GT_ROOT:-"$SCANNET_DATA_ROOT/extracted/scannet-dataset"}
+GPU_LIST=${GPU_LIST:-4,5,6}
+SCRIPT_DIR=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
+exec env FRAME_COUNTS="500" bash "$SCRIPT_DIR/run_scannet50_fairness.sh" \
+  "$CHECKPOINT" "$SCANNET_DATA_ROOT" "$SCANNET_GT_ROOT" "$GPU_LIST" "$OUTPUT_ROOT"

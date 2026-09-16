@@ -31,6 +31,10 @@ def main() -> None:
         # by an older evaluator.  The successful scene result is authoritative.
         if not path.with_name("metrics.json").exists():
             failures.append(json.loads(path.read_text()))
+    if args.fairness_fastvggt_protocol and (len(scenes) != 50 or failures):
+        raise RuntimeError(
+            f"fairness summaries require all 50 scenes with no failures; got {len(scenes)} successful and {len(failures)} failed"
+        )
     if not scenes:
         payload = {"method": args.method, "num_frames_requested": args.num_frames, "scene_count": 0,
                    "failed_scene_count": len(failures), "scenes": [], "failures": failures,
@@ -46,6 +50,12 @@ def main() -> None:
     else:
         values = [entry.get("retention_percent") for entry in token if entry.get("retention_percent") is not None]
         retention = {"policy": "fixed_once", "retention_percent": float(np.mean(values)) if values else None}
+    if args.fairness_fastvggt_protocol:
+        invalid = [item.get("scene") for item in scenes
+                   if item.get("protocol_id") != "fastvggt_fairness_v3"
+                   or item.get("method") != args.method or item.get("frames") != args.num_frames]
+        if invalid:
+            raise RuntimeError(f"fairness summary contains stale/incompatible results, e.g. {invalid[:3]}")
     payload = {"method": args.method, "num_frames_requested": args.num_frames,
                "protocol": {"experiment_kind": "fairness" if args.fairness_fastvggt_protocol else "main",
                             "sampler": ("released FastVGGT RGB/pose integer-stride selection" if args.fairness_fastvggt_protocol

@@ -48,6 +48,7 @@ SCANNET50_SCENES = (
     "scene0421_02", "scene0435_03", "scene0451_01", "scene0466_01", "scene0477_00", "scene0493_01", "scene0509_01", "scene0525_00", "scene0540_02", "scene0555_00",
     "scene0571_00", "scene0582_02", "scene0593_00", "scene0606_01", "scene0619_00", "scene0631_01", "scene0648_00", "scene0663_01", "scene0675_00", "scene0691_00",
 )
+FAIRNESS_PROTOCOL_ID = "fastvggt_fairness_v3"
 
 
 def json_default(value: Any):
@@ -373,6 +374,26 @@ def normal_consistency(source: o3d.geometry.PointCloud, target: o3d.geometry.Poi
     return np.abs(np.sum(source_normals * target_normals[indices], axis=1))
 
 
+def point_cloud_metrics(pred_cloud: o3d.geometry.PointCloud, gt_cloud: o3d.geometry.PointCloud,
+                        max_distance: float, tau: float) -> dict[str, float]:
+    """Metrics evaluated on one already-aligned, voxelized point-cloud pair."""
+    if not len(pred_cloud.points) or not len(gt_cloud.points):
+        raise RuntimeError("voxelization removed every reconstruction point")
+    pred_to_gt = np.clip(np.asarray(pred_cloud.compute_point_cloud_distance(gt_cloud)), 0, max_distance)
+    gt_to_pred = np.clip(np.asarray(gt_cloud.compute_point_cloud_distance(pred_cloud)), 0, max_distance)
+    precision, recall = float(np.mean(pred_to_gt < tau)), float(np.mean(gt_to_pred < tau))
+    f1 = 0.0 if precision + recall == 0 else 2 * precision * recall / (precision + recall)
+    nc_a, nc_b = normal_consistency(pred_cloud, gt_cloud), normal_consistency(gt_cloud, pred_cloud)
+    acc, comp = float(pred_to_gt.mean()), float(gt_to_pred.mean())
+    return {
+        "acc_m": acc, "acc_median_m": float(np.median(pred_to_gt)),
+        "comp_m": comp, "comp_median_m": float(np.median(gt_to_pred)),
+        "nc": float((nc_a.mean() + nc_b.mean()) / 2), "nc_median": float((np.median(nc_a) + np.median(nc_b)) / 2),
+        "cd_m": acc + comp, "overall_m": (acc + comp) / 2,
+        "f1_at_0.05m": f1, "precision_at_0.05m": precision, "recall_at_0.05m": recall,
+    }
+
+
 def reconstruction_metrics(prediction: np.ndarray, gt_path: Path, voxel: float, max_distance: float,
                            tau: float) -> tuple[dict[str, float], np.ndarray, np.ndarray]:
     target_cloud = o3d.io.read_point_cloud(str(gt_path))
@@ -384,27 +405,21 @@ def reconstruction_metrics(prediction: np.ndarray, gt_path: Path, voxel: float, 
     prediction = bbox_scale_align(prediction, target)
     pred_cloud = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(prediction)).voxel_down_sample(voxel)
     gt_cloud = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(target)).voxel_down_sample(voxel)
-    pred_to_gt = np.clip(np.asarray(pred_cloud.compute_point_cloud_distance(gt_cloud)), 0, max_distance)
-    gt_to_pred = np.clip(np.asarray(gt_cloud.compute_point_cloud_distance(pred_cloud)), 0, max_distance)
-    precision, recall = float(np.mean(pred_to_gt < tau)), float(np.mean(gt_to_pred < tau))
-    f1 = 0.0 if precision + recall == 0 else 2 * precision * recall / (precision + recall)
-    nc_a, nc_b = normal_consistency(pred_cloud, gt_cloud), normal_consistency(gt_cloud, pred_cloud)
-    acc, comp = float(pred_to_gt.mean()), float(gt_to_pred.mean())
-    metrics = {
-        "acc_m": acc, "acc_median_m": float(np.median(pred_to_gt)),
-        "comp_m": comp, "comp_median_m": float(np.median(gt_to_pred)),
-        "nc": float((nc_a.mean() + nc_b.mean()) / 2), "nc_median": float((np.median(nc_a) + np.median(nc_b)) / 2),
-        "cd_m": acc + comp, "overall_m": (acc + comp) / 2,
-        "fastvggt_acc_m": acc, "fastvggt_comp_m": comp, "fastvggt_cd_m": acc + comp,
-        "f1_at_0.05m": f1, "precision_at_0.05m": precision, "recall_at_0.05m": recall,
-        "pred_points_after_voxel": int(len(pred_cloud.points)), "gt_points_after_voxel": int(len(gt_cloud.points)),
-    }
+    metrics = point_cloud_metrics(pred_cloud, gt_cloud, max_distance, tau)
+    metrics.update(pred_points_after_voxel=int(len(pred_cloud.points)), gt_points_after_voxel=int(len(gt_cloud.points)))
     return metrics, np.asarray(pred_cloud.points), np.asarray(gt_cloud.points)
 
 
 def fastvggt_reconstruction_metrics(prediction: np.ndarray, prediction_min: np.ndarray, prediction_max: np.ndarray,
-                                    gt_path: Path, voxel: float, max_distance: float) -> dict[str, float]:
-    """Released FastVGGT ScanNet CD: full-cloud bbox alignment, then independent 100k samples."""
+                                    gt_path: Path, voxel: float, max_distance: float,
+                                    tau: float) -> tuple[dict[str, float], np.ndarray, np.ndarray]:
+    """FastVGGT point-cloud protocol, with every geometry metric on its final clouds.
+
+    This intentionally does not alter how DenseVGGT, FastVGGT, or SelfTR
+    reconstruct points.  It only evaluates each method's own depth-derived
+    point cloud after FastVGGT's full-cloud alignment, 100k sampling, and
+    voxelization procedure.
+    """
     target = np.asarray(o3d.io.read_point_cloud(str(gt_path)).points, dtype=np.float32)
     if len(prediction) < 10 or len(target) < 10:
         raise RuntimeError("too few reconstruction points")
@@ -421,12 +436,9 @@ def fastvggt_reconstruction_metrics(prediction: np.ndarray, prediction_min: np.n
         target = target[np.random.RandomState(33).choice(len(target), 100000, replace=False)]
     pred_cloud = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(prediction)).voxel_down_sample(voxel)
     gt_cloud = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(target)).voxel_down_sample(voxel)
-    acc = np.clip(np.asarray(pred_cloud.compute_point_cloud_distance(gt_cloud)), 0, max_distance)
-    comp = np.clip(np.asarray(gt_cloud.compute_point_cloud_distance(pred_cloud)), 0, max_distance)
-    return {"acc_m": float(acc.mean()), "comp_m": float(comp.mean()),
-            "cd_m": float(acc.mean() + comp.mean()),
-            "pred_points_after_voxel": int(len(pred_cloud.points)),
-            "gt_points_after_voxel": int(len(gt_cloud.points))}
+    metrics = point_cloud_metrics(pred_cloud, gt_cloud, max_distance, tau)
+    metrics.update(pred_points_after_voxel=int(len(pred_cloud.points)), gt_points_after_voxel=int(len(gt_cloud.points)))
+    return metrics, np.asarray(pred_cloud.points), np.asarray(gt_cloud.points)
 
 
 def visual_sample(points: np.ndarray, limit: int = 15000) -> np.ndarray:
@@ -554,30 +566,53 @@ def pose_metrics(predicted_c2w: np.ndarray, gt_c2w_world: np.ndarray) -> tuple[d
     return values, aligned, gt
 
 
-def fastvggt_trajectory_metrics(predicted_c2w: np.ndarray, gt_c2w_world: np.ndarray) -> dict[str, float]:
-    """Exact metric calls and pose convention from FastVGGT eval_utils.eval_trajectory."""
+def fastvggt_trajectory_metrics(predicted_c2w: np.ndarray, gt_c2w_world: np.ndarray,
+                                frame_ids: list[int], exact_fastvggt: bool = False) -> dict[str, Any]:
+    """Port FastVGGT's ScanNet ``eval_trajectory(..., align=True)`` protocol.
+
+    FastVGGT compares predicted and GT *world-to-camera* poses after changing
+    the GT trajectory to its first-camera coordinate system.  In particular,
+    it retains the original ScanNet frame IDs as trajectory timestamps rather
+    than replacing them with dense indices.  The fairness path also preserves
+    the released evaluator's ``align_origin=True`` argument exactly.
+    """
     gt_c2w = np.linalg.inv(gt_c2w_world[0]) @ gt_c2w_world
     poses_est, poses_gt = np.linalg.inv(predicted_c2w), np.linalg.inv(gt_c2w)
+    timestamps = np.asarray(frame_ids, dtype=np.float64)
     trajectory_gt = PoseTrajectory3D(
         positions_xyz=poses_gt[:, :3, 3],
         orientations_quat_wxyz=Rotation.from_matrix(poses_gt[:, :3, :3]).as_quat(scalar_first=True),
-        timestamps=np.arange(len(poses_gt)),
+        timestamps=timestamps,
     )
     trajectory_est = PoseTrajectory3D(
         positions_xyz=poses_est[:, :3, 3],
         orientations_quat_wxyz=Rotation.from_matrix(poses_est[:, :3, :3]).as_quat(scalar_first=True),
-        timestamps=np.arange(len(poses_est)),
+        timestamps=timestamps,
     )
-    # FastVGGT's source passes align_origin=True as well. EVO >= 1.36 rejects
-    # that contradictory combination; Sim(3) alignment is the operative part.
-    common = {"est_name": "traj", "align": True, "correct_scale": True}
-    ate = evo_ape.ape(deepcopy(trajectory_gt), deepcopy(trajectory_est), pose_relation=PoseRelation.translation_part, **common)
-    are = evo_ape.ape(deepcopy(trajectory_gt), deepcopy(trajectory_est), pose_relation=PoseRelation.rotation_angle_deg, **common)
+    common = {"est_name": "traj", "align": True, "correct_scale": True,
+              "align_origin": bool(exact_fastvggt)}
+
+    def evaluate(metric_fn, relation: PoseRelation, **kwargs):
+        """Use the released call first; adapt only EVO's known invalid argument pair."""
+        try:
+            return metric_fn(deepcopy(trajectory_gt), deepcopy(trajectory_est), pose_relation=relation, **kwargs), False
+        except ValueError as error:
+            if not exact_fastvggt or "align and align_origin" not in str(error):
+                raise
+            compatible_kwargs = {**kwargs, "align_origin": False}
+            return metric_fn(
+                deepcopy(trajectory_gt), deepcopy(trajectory_est), pose_relation=relation, **compatible_kwargs
+            ), True
+
+    ate, ate_compat = evaluate(evo_ape.ape, PoseRelation.translation_part, **common)
+    are, are_compat = evaluate(evo_ape.ape, PoseRelation.rotation_angle_deg, **common)
     rpe_common = {**common, "delta": 1, "delta_unit": Unit.frames, "rel_delta_tol": 0.01, "all_pairs": True}
-    rpe_rot = evo_rpe.rpe(deepcopy(trajectory_gt), deepcopy(trajectory_est), pose_relation=PoseRelation.rotation_angle_deg, **rpe_common)
-    rpe_trans = evo_rpe.rpe(deepcopy(trajectory_gt), deepcopy(trajectory_est), pose_relation=PoseRelation.translation_part, **rpe_common)
+    rpe_rot, rpe_rot_compat = evaluate(evo_rpe.rpe, PoseRelation.rotation_angle_deg, **rpe_common)
+    rpe_trans, rpe_trans_compat = evaluate(evo_rpe.rpe, PoseRelation.translation_part, **rpe_common)
     return {"fastvggt_ate_m": float(ate.stats["rmse"]), "fastvggt_are_deg": float(are.stats["rmse"]),
-            "fastvggt_rpe_rot_deg": float(rpe_rot.stats["rmse"]), "fastvggt_rpe_trans_m": float(rpe_trans.stats["rmse"])}
+            "fastvggt_rpe_rot_deg": float(rpe_rot.stats["rmse"]), "fastvggt_rpe_trans_m": float(rpe_trans.stats["rmse"]),
+            "evo_mode": ("released_align_origin" if not any((ate_compat, are_compat, rpe_rot_compat, rpe_trans_compat))
+                         else "sim3_align_origin_compat")}
 
 
 def save_trajectory_visualization(prediction: np.ndarray, target: np.ndarray, output_path: Path) -> None:
@@ -657,24 +692,30 @@ def evaluate_scene(model: VGGT, scene: str, records: list[dict[str, Any]], gt_c2
     full_prediction_min, full_prediction_max = predicted_point_bounds(
         depth, confidence, pred_c2w, intrinsic, gt_c2w[0], args.depth_confidence_threshold
     )
-    fastvggt_geometry = fastvggt_reconstruction_metrics(
+    fastvggt_geometry, fastvggt_pred_cloud, fastvggt_gt_cloud = fastvggt_reconstruction_metrics(
         released_fastvggt_points, full_prediction_min, full_prediction_max,
-        gt_ply, args.voxel_size, args.chamfer_max_distance
+        gt_ply, args.voxel_size, args.chamfer_max_distance, args.tau
     )
     pose, aligned_c2w, local_gt_c2w = pose_metrics(pred_c2w, gt_c2w)
-    fast_pose = fastvggt_trajectory_metrics(pred_c2w, gt_c2w)
+    fast_pose = fastvggt_trajectory_metrics(
+        pred_c2w, gt_c2w, [item["id"] for item in records], exact_fastvggt=args.fairness_fastvggt_protocol
+    )
     depth_result = depth_metrics(depth, records)
     visualization = None
     if args.save_visualizations:
         visualization_dir = args.output_dir / scene / "visualization"
-        save_reconstruction_visualization(pred_cloud, gt_cloud, visualization_dir)
+        visualization_pred, visualization_gt = (
+            (fastvggt_pred_cloud, fastvggt_gt_cloud) if args.fairness_fastvggt_protocol else (pred_cloud, gt_cloud)
+        )
+        save_reconstruction_visualization(visualization_pred, visualization_gt, visualization_dir)
         save_trajectory_visualization(aligned_c2w, local_gt_c2w, visualization_dir / "trajectory_xz.png")
         visualization = {
             "reconstruction_overlay_ply": str(visualization_dir / "reconstruction_overlay.ply"),
             "reconstruction_png": str(visualization_dir / "reconstruction.png"),
             "trajectory_png": str(visualization_dir / "trajectory_xz.png"),
         }
-    result = {"scene": scene, "frames": len(records), "frame_ids": [item["id"] for item in records],
+    result = {"scene": scene, "method": args.method, "frames": len(records), "frame_ids": [item["id"] for item in records],
+              "protocol_id": FAIRNESS_PROTOCOL_ID if args.fairness_fastvggt_protocol else "project_main_v1",
               "pose": pose, "fastvggt_pose": fast_pose,
               "reconstruction": geometry, "fastvggt_reconstruction": fastvggt_geometry, "depth": depth_result,
               "visualization": visualization,
@@ -757,21 +798,30 @@ def main() -> None:
                             f"project stride: every {args.main_frame_stride}-th valid RGB/pose/depth frame, capped at N"),
                 "source_frame_pool": f"at least {args.min_source_frames} valid source frames required; 300-frame caches are rejected",
                 "image_preprocessing": "FastVGGT ScanNet: width=518, aspect-preserving height rounded to a multiple of 14",
+                "protocol_id": FAIRNESS_PROTOCOL_ID if args.fairness_fastvggt_protocol else "project_main_v1",
                 "reconstruction": "project reference: deterministic 100k reservoir sample + bbox scale alignment + 0.05m voxel",
-                "fastvggt_reconstruction": "released FastVGGT: full-cloud bbox scale alignment, then concat-order-equivalent deterministic 100k choice + 0.05m voxel",
+                "fastvggt_reconstruction": "released FastVGGT: full-cloud bbox scale alignment, concat-order-equivalent deterministic 100k choice, and 0.05m voxel; Acc/Comp/NC/Precision/Recall/F1/CD are all evaluated on these final clouds",
                 "cd_m": "both paths report clipped bidirectional sum Acc+Comp (clip=0.5m) independently",
                 "overall_m": "(Acc+Comp)/2", "tau_m": args.tau,
                 "pose_note": "AUC@330 is reported as AUC@30; RPW-trans is reported as RPE-trans.",
-                "fastvggt_pose": "FastVGGT EVO APE/RPE calls with Sim(3) alignment; EVO>=1.36 omits the source's incompatible align_origin=True flag.",
+                "fastvggt_pose": "FastVGGT world-to-camera trajectory convention, selected ScanNet frame IDs as timestamps, and the released EVO APE/RPE arguments (including align_origin=True in fairness mode).",
                 "visualization": "optional coloured predicted/GT point clouds and FastVGGT-style Sim(3)-aligned XZ trajectory",
                 "token_note": "fixed policies log one retention value; SelfTR logs all three refresh stages."}
     results, failures = [], []
     for number, scene in enumerate(scenes, 1):
         scene_output = args.output_dir / scene / "metrics.json"
         if args.resume and scene_output.exists():
-            results.append(json.loads(scene_output.read_text()))
-            print(f"[{number}/{len(scenes)}] {scene}: resumed", flush=True)
-            continue
+            existing = json.loads(scene_output.read_text())
+            expected_protocol = FAIRNESS_PROTOCOL_ID if args.fairness_fastvggt_protocol else "project_main_v1"
+            if (existing.get("protocol_id") == expected_protocol
+                    and existing.get("method", args.method) == args.method
+                    and existing.get("frames") == args.num_frames):
+                results.append(existing)
+                print(f"[{number}/{len(scenes)}] {scene}: resumed", flush=True)
+                continue
+            raise RuntimeError(
+                f"refusing to resume incompatible result at {scene_output}; use a fresh output directory or remove it"
+            )
         print(f"[{number}/{len(scenes)}] {scene}: evaluating", flush=True)
         try:
             records, gt_c2w = scene_records(
