@@ -32,6 +32,11 @@ has_visualizations() {
   for file in "${VISUALIZATION_FILES[@]}"; do
     [[ -s "$scene_output/visualization/${artifact_tag}__${file}" ]] || return 1
   done
+  local setting="fastvggt_reference_sampler"
+  if [[ "$method" == "fastvggt" ]]; then setting+="__merge0.9"; fi
+  if [[ "$method" == "selftr" ]]; then setting+="__lambda0.04__radius2__window4"; fi
+  [[ -s "$scene_output/visualization/${artifact_tag}__${setting}__pointcloud.glb" ]] || return 1
+  [[ -s "$scene_output/visualization/${artifact_tag}__${setting}__pointcloud.json" ]] || return 1
 }
 
 run_scene() {
@@ -48,7 +53,8 @@ run_scene() {
     CUDA_VISIBLE_DEVICES="$gpu" "$PYTHON_BIN" scripts/eval_scannet50.py \
       --method "$method" --checkpoint "$CHECKPOINT" --dataset-root "$DATA_ROOT" --gt-root "$GT_ROOT" \
       --num-frames 100 --require-exact-frames --scenes "$scene" --skip-summary "${resume_args[@]}" \
-      --fairness-fastvggt-protocol --save-visualizations --device cuda:0 --output-dir "$OUTPUT_ROOT/${method}_100"
+      --fairness-fastvggt-protocol --save-visualizations --visualization-scenes "$scene" \
+      --device cuda:0 --output-dir "$OUTPUT_ROOT/${method}_100"
   done
 }
 

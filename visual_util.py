@@ -132,6 +132,59 @@ def predictions_to_glb(
     return apply_scene_alignment(scene, extrinsics)
 
 
+def point_cloud_to_glb(
+    vertices: np.ndarray,
+    colors: np.ndarray,
+    camera_to_world: np.ndarray | None = None,
+    max_points: int = 1_000_000,
+) -> trimesh.Scene:
+    """Create a GLB-ready coloured point cloud from already reconstructed points.
+
+    This is the streaming-evaluation counterpart to :func:`predictions_to_glb`:
+    callers can provide a bounded sample rather than materialising every pixel
+    from a long sequence. ``vertices`` and ``camera_to_world`` use OpenCV
+    coordinates and are converted to the OpenGL convention expected by GLB.
+    """
+    vertices = np.asarray(vertices, dtype=np.float32)
+    colors = np.asarray(colors)
+    if vertices.ndim != 2 or vertices.shape[1] != 3:
+        raise ValueError(f"vertices must have shape [N, 3], got {vertices.shape}")
+    if colors.ndim != 2 or colors.shape[0] != len(vertices) or colors.shape[1] not in (3, 4):
+        raise ValueError(f"colors must have shape [N, 3] or [N, 4], got {colors.shape}")
+    if max_points < 0:
+        raise ValueError("max_points must be non-negative")
+    if np.issubdtype(colors.dtype, np.floating):
+        colors = (colors * 255 if colors.size and colors.max() <= 1.0 else colors).clip(0, 255).astype(np.uint8)
+    else:
+        colors = colors.clip(0, 255).astype(np.uint8)
+    colors = colors[:, :3]
+
+    mask = np.isfinite(vertices).all(axis=1)
+    vertices, colors = vertices[mask], colors[mask]
+    vertices, colors = _limit_points(vertices, colors, max_points)
+    if not len(vertices):
+        vertices = np.array([[0.0, 0.0, 0.0]], dtype=np.float32)
+        colors = np.array([[255, 255, 255]], dtype=np.uint8)
+        scene_scale = 1.0
+    else:
+        lower, upper = np.percentile(vertices, 5, axis=0), np.percentile(vertices, 95, axis=0)
+        scene_scale = max(float(np.linalg.norm(upper - lower)), 1.0)
+
+    open_gl = get_opengl_conversion_matrix()
+    scene = trimesh.Scene()
+    scene.add_geometry(trimesh.PointCloud(vertices=transform_points(open_gl, vertices), colors=colors))
+    if camera_to_world is not None:
+        camera_to_world = np.asarray(camera_to_world, dtype=np.float64)
+        if camera_to_world.ndim != 3 or camera_to_world.shape[1:] != (4, 4):
+            raise ValueError(f"camera_to_world must have shape [frames, 4, 4], got {camera_to_world.shape}")
+        colormap = colormaps.get_cmap("gist_rainbow")
+        for index, transform in enumerate(camera_to_world):
+            color = tuple(int(255 * value) for value in colormap(index / max(len(camera_to_world), 1))[:3])
+            # Convert both world and camera axes from OpenCV to OpenGL.
+            integrate_camera_into_scene(scene, open_gl @ transform, color, scene_scale)
+    return scene
+
+
 def _prediction_array(predictions: dict, *names: str) -> np.ndarray:
     """Return the first available prediction as a NumPy array."""
     for name in names:

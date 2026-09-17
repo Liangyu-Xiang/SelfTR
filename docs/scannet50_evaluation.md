@@ -21,7 +21,9 @@ It passes `--fairness-fastvggt-protocol` to every method.  That switch uses
 the released FastVGGT frame selector exactly: retain the first valid RGB/pose
 frame, integer-stride sample the remaining valid RGB/pose frames, then truncate
 at the requested count.  It intentionally does not alter the main protocol.
-In this mode the FastVGGT baseline also uses the released protected bipartite
+Its RGB preprocessing also follows FastVGGT: resize to width 518 with the
+height rounded to a multiple of 14, then centre-crop vertically to 518 px when
+the resized image is taller.  In this mode the FastVGGT baseline also uses the released protected bipartite
 merge/unmerge ordering and camera/depth heads only; the existing latency timing
 boundary is unchanged.
 
@@ -114,14 +116,35 @@ includes the requested medians, normal consistency, precision/recall/F1 at
 retention.  FastVGGT/DenseVGGT retain one fixed-policy statistic; SelTR records
 all three grouping refresh stages.
 
-With `--save-visualizations` (enabled by all three launcher scripts), each
-scene receives separate predicted/GT/overlay PLYs, a reconstruction PNG, and
-an XZ trajectory PNG. Every artifact name encodes its protocol, method, actual
-frame count, and scene, for example
+With `--save-visualizations`, a selected scene receives separate predicted/GT/
+overlay PLYs, a reconstruction PNG, and an XZ trajectory PNG, as well as an
+interactive coloured GLB and a JSON sidecar. Every artifact name encodes its
+protocol, method, actual frame count, scene, and GLB sampler setting, for example
 `fastvggt_fairness_v3__fastvggt__500f__scene0000_00__trajectory_xz.png`.
+The paired GLB is named
+`fastvggt_fairness_v3__fastvggt__500f__scene0000_00__fastvggt_reference_sampler__merge0.9__pointcloud.glb`;
+its JSON metadata records the exact experiment, coordinate convention, point
+count, and camera count. Use `--no-save-visualizations` only when artifacts
+are intentionally not required.
+The formal fairness runner saves them only for the deterministic, evenly
+distributed ten scenes `scene0000_00`, `scene0071_00`, `scene0150_00`,
+`scene0221_01`, `scene0309_00`, `scene0380_02`, `scene0466_01`,
+`scene0540_02`, `scene0619_00`, and `scene0691_00`; metrics remain over all
+50 scenes.  The two-scene smoke runner saves both smoke scenes.  Pass
+`--visualization-scenes ...` when a direct invocation needs a different set.
 The trajectory computation uses FastVGGT's `eval_trajectory(..., align=True)`
 route: the first finite pose in the complete pose sequence as origin,
 world-to-camera poses, Sim(3) alignment, EVO XZ plotting, GT dashed trace,
-and aligned APE colour map. The project publication layout intentionally
+and aligned APE colour map. Numeric FastVGGT ATE/ARE/RPE and the trajectory
+PNG reuse the very same prepared EVO alignment, including the version-specific
+compatibility fallback when EVO rejects the released `align_origin=True` pair.
+The project publication layout intentionally
 removes FastVGGT's ATE/ARE title and makes the colorbar exactly the same height
 as the plotting axes.
+
+After a complete fairness run, `fairness_paper_report.md` and
+`fairness_paper_report.json` are written at the output root.  Their Acc/Comp/
+NC/CD columns intentionally use `mean_fastvggt_reconstruction` (the released
+FastVGGT cloud pipeline), and `Spd.` is the DenseVGGT mean latency divided by
+the corresponding method's mean latency at the same frame count.  Fixed
+methods report one token-retention value; SelfTR reports its three stage values.

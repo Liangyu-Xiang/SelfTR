@@ -18,6 +18,12 @@ IFS=',' read -r -a GPUS <<< "$GPU_LIST"
 read -r -a FRAMES <<< "$FRAME_COUNTS"
 mapfile -t SCENES < <(find "$DATA_ROOT" -mindepth 1 -maxdepth 1 -type d -name 'scene*' -printf '%f\n' | sort)
 (( ${#SCENES[@]} == 50 )) || { echo "expected 50 ScanNet scenes under $DATA_ROOT, found ${#SCENES[@]}" >&2; exit 2; }
+# Publication artifacts are intentionally bounded to evenly distributed scenes;
+# metrics still cover every one of the 50 ScanNet50 scenes.
+VISUALIZATION_SCENES=(
+  scene0000_00 scene0071_00 scene0150_00 scene0221_01 scene0309_00
+  scene0380_02 scene0466_01 scene0540_02 scene0619_00 scene0691_00
+)
 
 run_worker() {
   local gpu=$1 worker=$2
@@ -30,7 +36,8 @@ run_worker() {
       CUDA_VISIBLE_DEVICES=$gpu "$PYTHON_BIN" scripts/eval_scannet50.py \
         --method "$method" --checkpoint "$CHECKPOINT" --dataset-root "$DATA_ROOT" --gt-root "$GT_ROOT" \
         --num-frames "$frames" --require-exact-frames --scenes "${selected[@]}" --skip-summary --resume \
-        --fairness-fastvggt-protocol --save-visualizations --device cuda:0 --output-dir "$OUTPUT_ROOT/${method}_${frames}"
+        --fairness-fastvggt-protocol --save-visualizations --visualization-scenes "${VISUALIZATION_SCENES[@]}" \
+        --device cuda:0 --output-dir "$OUTPUT_ROOT/${method}_${frames}"
     done
   done
 }
@@ -93,3 +100,4 @@ for frames in "${FRAMES[@]}"; do
   done
 done
 "$PYTHON_BIN" scripts/validate_scannet50_fairness.py --output-root "$OUTPUT_ROOT" --frames "${FRAMES[@]}"
+"$PYTHON_BIN" scripts/report_scannet50_fairness.py --output-root "$OUTPUT_ROOT" --frames "${FRAMES[@]}"

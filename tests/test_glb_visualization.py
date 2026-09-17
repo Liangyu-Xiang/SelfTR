@@ -4,7 +4,7 @@ import numpy as np
 import pytest
 
 pytest.importorskip("trimesh")
-from visual_util import predictions_to_glb
+from visual_util import point_cloud_to_glb, predictions_to_glb
 
 
 def test_predictions_to_glb_accepts_batched_vggt_predictions():
@@ -34,4 +34,14 @@ def test_predictions_to_glb_accepts_batched_vggt_predictions():
 
     assert len(point_cloud.vertices) == 8
     assert len(scene.geometry) == 3  # One point cloud plus one frustum per frame.
+    assert scene.export(file_type="glb").startswith(b"glTF")
+
+
+def test_point_cloud_to_glb_supports_a_bounded_evaluation_sample():
+    scene = point_cloud_to_glb(
+        vertices=np.array([[0, 0, 1], [1, 0, 1], [0, 1, 1]], dtype=np.float32),
+        colors=np.array([[255, 0, 0], [0, 255, 0], [0, 0, 255]], dtype=np.uint8),
+        camera_to_world=np.eye(4, dtype=np.float32)[None],
+    )
+    assert len(scene.geometry) == 2
     assert scene.export(file_type="glb").startswith(b"glTF")
