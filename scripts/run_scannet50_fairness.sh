@@ -17,6 +17,15 @@ FRAME_COUNTS=${FRAME_COUNTS:-"100 300 500 1000"}
 FAIRNESS_METHODS=${FAIRNESS_METHODS:-"densevggt fastvggt selftr"}
 PYTHON_BIN=${EVAL_PYTHON:-python}
 PROGRESS_INTERVAL=${PROGRESS_INTERVAL:-5}
+# Some rented multi-core hosts expose more CPUs than NumExpr's built-in
+# safety limit. Keep its CPU-only post-processing bounded; this does not
+# affect CUDA inference, latency timing, or GPU memory measurements.
+NUMEXPR_MAX_THREADS=${NUMEXPR_MAX_THREADS:-64}
+NUMEXPR_NUM_THREADS=${NUMEXPR_NUM_THREADS:-16}
+if (( NUMEXPR_NUM_THREADS > NUMEXPR_MAX_THREADS )); then
+  NUMEXPR_NUM_THREADS=$NUMEXPR_MAX_THREADS
+fi
+export NUMEXPR_MAX_THREADS NUMEXPR_NUM_THREADS
 
 IFS=',' read -r -a GPUS <<< "$GPU_LIST"
 read -r -a FRAMES <<< "$FRAME_COUNTS"

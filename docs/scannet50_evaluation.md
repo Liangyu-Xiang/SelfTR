@@ -43,6 +43,10 @@ FRAME_COUNTS="500 1000" bash scripts/run_scannet50_fairness.sh /path/to/vggt.pt 
 It renders a live terminal progress bar over all expected scene jobs
 (`50 × methods × requested frame counts`), including elapsed time and ETA.
 Set `PROGRESS_INTERVAL=10` to update it every 10 seconds.
+The runner also exports `NUMEXPR_MAX_THREADS=64` and
+`NUMEXPR_NUM_THREADS=16` by default to avoid a CPU-only NumExpr thread-limit
+error on high-core-count rented hosts; either value can be overridden in the
+shell environment.
 
 To prioritize the two efficient methods on a subset of GPUs, select them with
 `FAIRNESS_METHODS` and retain the same output root. For example:
