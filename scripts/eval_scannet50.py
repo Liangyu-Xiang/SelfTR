@@ -463,16 +463,24 @@ def visual_sample(points: np.ndarray, limit: int = 15000) -> np.ndarray:
     return points[np.random.RandomState(33).choice(len(points), limit, replace=False)]
 
 
-def save_reconstruction_visualization(prediction: np.ndarray, target: np.ndarray, output_dir: Path) -> None:
+def save_reconstruction_visualization(prediction: np.ndarray, target: np.ndarray, output_dir: Path,
+                                      artifact_tag: str) -> dict[str, str]:
     """Save an inspectable coloured PLY and an overview rendering of metric points."""
     output_dir.mkdir(parents=True, exist_ok=True)
+    def artifact(name: str) -> Path:
+        return output_dir / f"{artifact_tag}__{name}"
+
     pred_cloud = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(prediction))
     gt_cloud = o3d.geometry.PointCloud(o3d.utility.Vector3dVector(target))
     pred_cloud.paint_uniform_color((0.15, 0.45, 0.95))
     gt_cloud.paint_uniform_color((0.15, 0.75, 0.35))
-    o3d.io.write_point_cloud(str(output_dir / "reconstruction_pred_aligned.ply"), pred_cloud)
-    o3d.io.write_point_cloud(str(output_dir / "reconstruction_gt.ply"), gt_cloud)
-    o3d.io.write_point_cloud(str(output_dir / "reconstruction_overlay.ply"), pred_cloud + gt_cloud)
+    pred_path, gt_path, overlay_path = (
+        artifact("reconstruction_pred_aligned.ply"), artifact("reconstruction_gt.ply"),
+        artifact("reconstruction_overlay.ply"),
+    )
+    o3d.io.write_point_cloud(str(pred_path), pred_cloud)
+    o3d.io.write_point_cloud(str(gt_path), gt_cloud)
+    o3d.io.write_point_cloud(str(overlay_path), pred_cloud + gt_cloud)
 
     import matplotlib
     matplotlib.use("Agg")
@@ -487,8 +495,13 @@ def save_reconstruction_visualization(prediction: np.ndarray, target: np.ndarray
     axis.set_title("ScanNet reconstruction: predicted vs. GT")
     axis.legend(markerscale=10)
     figure.tight_layout()
-    figure.savefig(output_dir / "reconstruction.png", dpi=180)
+    reconstruction_path = artifact("reconstruction.png")
+    figure.savefig(reconstruction_path, dpi=180)
     plt.close(figure)
+    return {
+        "reconstruction_pred_aligned_ply": str(pred_path), "reconstruction_gt_ply": str(gt_path),
+        "reconstruction_overlay_ply": str(overlay_path), "reconstruction_png": str(reconstruction_path),
+    }
 
 
 def irls_scale_shift(pred: np.ndarray, gt: np.ndarray, iterations: int = 8) -> tuple[float, float]:
@@ -632,7 +645,7 @@ def fastvggt_trajectory_metrics(predicted_c2w: np.ndarray, fastvggt_gt_c2w: np.n
 
 def save_fastvggt_trajectory_visualization(predicted_c2w: np.ndarray, fastvggt_gt_c2w: np.ndarray,
                                            frame_ids: list[int], output_path: Path) -> None:
-    """Save FastVGGT's exact ``eval_trajectory(..., align=True)`` XZ plot."""
+    """Save the FastVGGT trajectory computation in the project's publication layout."""
     import matplotlib
     matplotlib.use("Agg")
     import matplotlib.pyplot as plt
@@ -663,13 +676,24 @@ def save_fastvggt_trajectory_visualization(predicted_c2w: np.ndarray, fastvggt_g
     )
     figure = plt.figure()
     axis = evo_plot.prepare_axis(figure, evo_plot.PlotMode.xz)
-    axis.set_title(f"ATE: {round(ate_result.stats['rmse'], 3)}, ARE: {round(are_result.stats['rmse'], 3)}")
     evo_plot.traj(axis, evo_plot.PlotMode.xz, trajectory_gt, "--", "gray", "gt")
     evo_plot.traj_colormap(
         axis, ate_result.trajectories["traj"], ate_result.np_arrays["error_array"], evo_plot.PlotMode.xz,
         min_map=ate_result.stats["min"], max_map=ate_result.stats["max"],
     )
     axis.legend()
+    # The trajectory data, alignment, and EVO artists above are identical to
+    # FastVGGT. The final publication layout intentionally omits its ATE/ARE
+    # title and makes the colorbar exactly as high as the plotting axes.
+    figure.canvas.draw()
+    colorbar_axes = [candidate for candidate in figure.axes if candidate is not axis]
+    if len(colorbar_axes) != 1:
+        raise RuntimeError(f"expected one trajectory colorbar axis, found {len(colorbar_axes)}")
+    axis_bounds = axis.get_position()
+    colorbar_bounds = colorbar_axes[0].get_position()
+    colorbar_axes[0].set_axes_locator(None)
+    colorbar_axes[0].set_aspect("auto")
+    colorbar_axes[0].set_position((colorbar_bounds.x0, axis_bounds.y0, colorbar_bounds.width, axis_bounds.height))
     # Preserve FastVGGT's rendering/serialization boundary exactly: it renders
     # the active pyplot figure to a PNG buffer, materializes it as PIL, then
     # saves that PIL image to disk in ``evaluate_scene_and_save``.
@@ -744,18 +768,19 @@ def evaluate_scene(model: VGGT, scene: str, records: list[dict[str, Any]], gt_c2
     visualization = None
     if args.save_visualizations:
         visualization_dir = args.output_dir / scene / "visualization"
+        protocol_id = FAIRNESS_PROTOCOL_ID if args.fairness_fastvggt_protocol else "project_main_v1"
+        artifact_tag = f"{protocol_id}__{args.method}__{len(records)}f__{scene}"
         visualization_pred, visualization_gt = (
             (fastvggt_pred_cloud, fastvggt_gt_cloud) if args.fairness_fastvggt_protocol else (pred_cloud, gt_cloud)
         )
-        save_reconstruction_visualization(visualization_pred, visualization_gt, visualization_dir)
-        save_fastvggt_trajectory_visualization(
-            pred_c2w, fastvggt_gt_c2w, [item["id"] for item in records], visualization_dir / "trajectory_xz.png"
+        visualization = save_reconstruction_visualization(
+            visualization_pred, visualization_gt, visualization_dir, artifact_tag
         )
-        visualization = {
-            "reconstruction_overlay_ply": str(visualization_dir / "reconstruction_overlay.ply"),
-            "reconstruction_png": str(visualization_dir / "reconstruction.png"),
-            "trajectory_png": str(visualization_dir / "trajectory_xz.png"),
-        }
+        trajectory_path = visualization_dir / f"{artifact_tag}__trajectory_xz.png"
+        save_fastvggt_trajectory_visualization(
+            pred_c2w, fastvggt_gt_c2w, [item["id"] for item in records], trajectory_path
+        )
+        visualization.update({"artifact_tag": artifact_tag, "trajectory_png": str(trajectory_path)})
     result = {"scene": scene, "method": args.method, "frames": len(records), "frame_ids": [item["id"] for item in records],
               "protocol_id": FAIRNESS_PROTOCOL_ID if args.fairness_fastvggt_protocol else "project_main_v1",
               "pose": pose, "fastvggt_pose": fast_pose,

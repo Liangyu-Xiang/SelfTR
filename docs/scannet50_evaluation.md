@@ -115,10 +115,13 @@ retention.  FastVGGT/DenseVGGT retain one fixed-policy statistic; SelTR records
 all three grouping refresh stages.
 
 With `--save-visualizations` (enabled by all three launcher scripts), each
-scene also receives `visualization/reconstruction_overlay.ply`, separate
-predicted/GT PLYs, `reconstruction.png`, and `trajectory_xz.png`. The
-trajectory image uses FastVGGT's original `eval_trajectory(..., align=True)`
+scene receives separate predicted/GT/overlay PLYs, a reconstruction PNG, and
+an XZ trajectory PNG. Every artifact name encodes its protocol, method, actual
+frame count, and scene, for example
+`fastvggt_fairness_v3__fastvggt__500f__scene0000_00__trajectory_xz.png`.
+The trajectory computation uses FastVGGT's `eval_trajectory(..., align=True)`
 route: the first finite pose in the complete pose sequence as origin,
-world-to-camera poses, the same Sim(3) alignment, EVO XZ plotting, GT dashed
-trace, aligned APE colour map, and the same matplotlib-buffer/PIL PNG save
-chain.
+world-to-camera poses, Sim(3) alignment, EVO XZ plotting, GT dashed trace,
+and aligned APE colour map. The project publication layout intentionally
+removes FastVGGT's ATE/ARE title and makes the colorbar exactly the same height
+as the plotting axes.

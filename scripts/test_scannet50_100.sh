@@ -27,9 +27,10 @@ for scene in "${SCENES[@]}"; do
 done
 
 has_visualizations() {
-  local scene_output=$1 file
+  local scene_output=$1 method=$2 scene=$3 file
+  local artifact_tag="fastvggt_fairness_v3__${method}__100f__${scene}"
   for file in "${VISUALIZATION_FILES[@]}"; do
-    [[ -s "$scene_output/visualization/$file" ]] || return 1
+    [[ -s "$scene_output/visualization/${artifact_tag}__${file}" ]] || return 1
   done
 }
 
@@ -38,7 +39,7 @@ run_scene() {
   for method in densevggt fastvggt selftr; do
     local scene_output="$OUTPUT_ROOT/${method}_100/$scene"
     local resume_args=()
-    if [[ -f "$scene_output/metrics.json" ]] && has_visualizations "$scene_output"; then
+    if [[ -f "$scene_output/metrics.json" ]] && has_visualizations "$scene_output" "$method" "$scene"; then
       resume_args+=(--resume)
     else
       echo "[smoke] GPU ${gpu}: ${scene}, ${method}, regenerating metrics and visualizations" >&2
@@ -63,7 +64,7 @@ wait "${pids[@]}"
 for method in densevggt fastvggt selftr; do
   for scene in "${SCENES[@]}"; do
     scene_output="$OUTPUT_ROOT/${method}_100/$scene"
-    if ! has_visualizations "$scene_output"; then
+    if ! has_visualizations "$scene_output" "$method" "$scene"; then
       echo "[smoke] missing visualization output for ${method}/${scene}: $scene_output/visualization" >&2
       exit 1
     fi
