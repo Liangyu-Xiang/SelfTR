@@ -289,17 +289,29 @@ class Aggregator(nn.Module):
 
         normalized = (images - self._resnet_mean) / self._resnet_std
         patch_tokens = self.patch_embed(normalized.view(B * S, C_in, H, W))
-
         if isinstance(patch_tokens, dict):
             patch_tokens = patch_tokens["x_norm_patchtokens"]
 
-        return self.forward_from_patch_tokens(patch_tokens, B, S, H, W)
+        # This normal inference path owns these input-only tensors.  Assemble
+        # the transformer sequence first, then release them before the 24
+        # attention blocks.  Passing patch_tokens to forward_from_patch_tokens
+        # would retain both caller locals until that whole call returned.
+        tokens, pos = self._assemble_tokens(patch_tokens, B, S, H, W)
+        del patch_tokens
+        del normalized
+        return self._forward_tokens(tokens, B, S, H, W, pos)
 
     def forward_from_patch_tokens(
         self, patch_tokens: torch.Tensor, B: int, S: int, H: int, W: int
     ) -> Tuple[List[Optional[torch.Tensor]], int]:
         """Run alternating attention from cached DINO patch tokens (DA-VGGT entry)."""
-        _, P, C = patch_tokens.shape
+        tokens, pos = self._assemble_tokens(patch_tokens, B, S, H, W)
+        return self._forward_tokens(tokens, B, S, H, W, pos)
+
+    def _assemble_tokens(
+        self, patch_tokens: torch.Tensor, B: int, S: int, H: int, W: int
+    ) -> tuple[torch.Tensor, torch.Tensor | None]:
+        """Build the transformer token sequence and its RoPE coordinates."""
 
         # Expand camera and register tokens to match batch size and sequence length
         camera_token = slice_expand_and_flatten(self.camera_token, B, S)
@@ -307,6 +319,8 @@ class Aggregator(nn.Module):
 
         # Concatenate special tokens with patch tokens
         tokens = torch.cat([camera_token, register_token, patch_tokens], dim=1)
+        del camera_token
+        del register_token
 
         pos = None
         if self.rope is not None:
@@ -322,10 +336,17 @@ class Aggregator(nn.Module):
                 B * S, self.patch_start_idx, 2, device=patch_tokens.device, dtype=pos.dtype
             )
             pos = torch.cat([pos_special, pos], dim=1)
-        full_pos = pos
+            del pos_special
+        return tokens, pos
+
+    def _forward_tokens(
+        self, tokens: torch.Tensor, B: int, S: int, H: int, W: int, pos: torch.Tensor | None
+    ) -> Tuple[List[Optional[torch.Tensor]], int]:
+        """Run alternating attention after input-only tensors are released."""
 
         # update P because we added special tokens
         _, P, C = tokens.shape
+        full_pos = pos
 
         frame_idx = 0
         global_idx = 0
@@ -335,22 +356,33 @@ class Aggregator(nn.Module):
         active_frames = S
 
         for _ in range(self.aa_block_num):
+            # Only decoder taps need a full [B, S, P, C] intermediate.  On
+            # long sequences, creating these views at every layer unnecessarily
+            # keeps a prior full-token storage alive across the next operation.
+            need_intermediates = any(
+                global_idx + offset in self.cached_layer_indices
+                for offset in range(self.aa_block_size)
+            )
             for attn_type in self.aa_order:
                 if attn_type == "frame":
                     tokens, frame_idx, frame_intermediates = self._process_frame_attention(
-                        tokens, B, active_frames, P, C, frame_idx, pos=pos
+                        tokens, B, active_frames, P, C, frame_idx, pos=pos,
+                        need_intermediates=need_intermediates,
                     )
                 elif attn_type == "global":
                     tokens, global_idx, global_intermediates = self._process_global_attention(
                         tokens, B, active_frames, P, C, global_idx, pos=pos,
                         patch_grid_size=(H // self.patch_size, W // self.patch_size),
+                        need_intermediates=need_intermediates,
                     )
                 else:
                     raise ValueError(f"Unknown attention type: {attn_type}")
 
-            for i in range(len(frame_intermediates)):
+            for i in range(self.aa_block_size):
                 layer_idx = len(output_list)
                 if layer_idx in self.cached_layer_indices:
+                    if frame_intermediates is None or global_intermediates is None:
+                        raise RuntimeError("missing cached transformer intermediate")
                     # concat frame and global intermediates, [B x S x P x 2C]
                     frame_output = frame_intermediates[i]
                     global_output = global_intermediates[i]
@@ -361,6 +393,9 @@ class Aggregator(nn.Module):
                     output_list.append(concat_inter)
                 else:
                     output_list.append(None)
+
+            del frame_intermediates
+            del global_intermediates
 
             block_idx = len(output_list) - 1
             if (
@@ -415,11 +450,9 @@ class Aggregator(nn.Module):
                 active_frames = S
                 pos = full_pos
 
-        del frame_intermediates
-        del global_intermediates
         return output_list, self.patch_start_idx
 
-    def _process_frame_attention(self, tokens, B, S, P, C, frame_idx, pos=None):
+    def _process_frame_attention(self, tokens, B, S, P, C, frame_idx, pos=None, need_intermediates=False):
         """
         Process frame attention blocks. We keep tokens in shape (B*S, P, C).
         """
@@ -430,7 +463,7 @@ class Aggregator(nn.Module):
         if pos is not None and pos.shape != (B * S, P, 2):
             pos = pos.view(B, S, P, 2).view(B * S, P, 2)
 
-        intermediates = []
+        intermediates = [] if need_intermediates else None
 
         # by default, self.aa_block_size=1, which processes one block at a time
         for _ in range(self.aa_block_size):
@@ -439,11 +472,14 @@ class Aggregator(nn.Module):
             else:
                 tokens = self.frame_blocks[frame_idx](tokens, pos=pos)
             frame_idx += 1
-            intermediates.append(tokens.view(B, S, P, C))
+            if need_intermediates:
+                intermediates.append(tokens.view(B, S, P, C))
 
         return tokens, frame_idx, intermediates
 
-    def _process_global_attention(self, tokens, B, S, P, C, global_idx, pos=None, patch_grid_size=None):
+    def _process_global_attention(
+        self, tokens, B, S, P, C, global_idx, pos=None, patch_grid_size=None, need_intermediates=False
+    ):
         """
         Process global attention blocks. We keep tokens in shape (B, S*P, C).
         """
@@ -453,7 +489,7 @@ class Aggregator(nn.Module):
         if pos is not None and pos.shape != (B, S * P, 2):
             pos = pos.view(B, S, P, 2).view(B, S * P, 2)
 
-        intermediates = []
+        intermediates = [] if need_intermediates else None
 
         # by default, self.aa_block_size=1, which processes one block at a time
         for _ in range(self.aa_block_size):
@@ -500,13 +536,17 @@ class Aggregator(nn.Module):
                 })
                 tokens = tokens.view(B, S, P, C)
             elif use_fast_merge:
-                normalized = self.global_blocks[block_idx].norm1(tokens)
+                # Keep this schedule equivalent to FastVGGT's memory-aware
+                # Block.forward: each full-token temporary is released before
+                # allocating the next one (especially the 4x-width MLP).
+                block = self.global_blocks[block_idx]
+                normalized = block.norm1(tokens)
                 if self.token_merging_method == "fastvggt_reference":
                     residual = fastvggt_reference_attention(
-                        self.global_blocks[block_idx].attn, normalized, pos,
+                        block.attn, normalized, pos,
                         patch_width=patch_grid_size[1], patch_height=patch_grid_size[0], merge_ratio=merge_ratio,
                     )
-                    active_tokens = int(getattr(self.global_blocks[block_idx].attn, "_fastvggt_reference_active_tokens", S * P))
+                    active_tokens = int(getattr(block.attn, "_fastvggt_reference_active_tokens", S * P))
                     self.last_token_merging_stats.append(
                         {"block": block_idx, "original_tokens": int(S * P), "active_tokens": active_tokens,
                          "full_attention_token_ratio": active_tokens / float(S * P),
@@ -521,7 +561,7 @@ class Aggregator(nn.Module):
                         grid_size=patch_grid_size,
                         merge_ratio=merge_ratio,
                     )
-                    residual = fastvggt_attention(self.global_blocks[block_idx].attn, normalized, pos, plan)
+                    residual = fastvggt_attention(block.attn, normalized, pos, plan)
                     if plan is not None:
                         self.last_token_merging_stats.append(
                             {
@@ -532,15 +572,22 @@ class Aggregator(nn.Module):
                                 "merged_away_token_ratio": 1.0 - plan.active_tokens / plan.original_tokens,
                             }
                         )
-                tokens = tokens + self.global_blocks[block_idx].ls1(residual)
-                tokens = tokens + self.global_blocks[block_idx].ls2(self.global_blocks[block_idx].mlp(self.global_blocks[block_idx].norm2(tokens)))
+                del normalized
+                tokens = tokens + block.ls1(residual)
+                del residual
+                norm2_output = block.norm2(tokens)
+                mlp_output = block.mlp(norm2_output)
+                del norm2_output
+                tokens = tokens + block.ls2(mlp_output)
+                del mlp_output
                 tokens = tokens.view(B, S, P, C)
             elif self.training:
                 tokens = checkpoint(self.global_blocks[global_idx], tokens, pos, use_reentrant=self.use_reentrant)
             else:
                 tokens = self.global_blocks[global_idx](tokens, pos=pos)
             global_idx += 1
-            intermediates.append(tokens.view(B, S, P, C))
+            if need_intermediates:
+                intermediates.append(tokens.view(B, S, P, C))
 
         return tokens, global_idx, intermediates
 

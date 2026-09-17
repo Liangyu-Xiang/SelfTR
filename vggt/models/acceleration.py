@@ -571,10 +571,27 @@ def fastvggt_reference_attention(
     key_in = key.permute(0, 2, 1, 3).reshape(batch, token_count, channels)
     value_in = value.permute(0, 2, 1, 3).reshape(batch, token_count, channels)
     query_out, key_out, value_out = merge(query_in, mode="mean", extra_tensors=key_in, extra_tensors_2=value_in)
+    # These three full-length contiguous layouts are only merge inputs.  The
+    # released FastVGGT attention discards them before running SDPA.
+    del query_in
+    del key_in
+    del value_in
     query = query_out.reshape(batch, -1, attention.num_heads, attention.head_dim).permute(0, 2, 1, 3)
     key = key_out.reshape(batch, -1, attention.num_heads, attention.head_dim).permute(0, 2, 1, 3)
     value = value_out.reshape(batch, -1, attention.num_heads, attention.head_dim).permute(0, 2, 1, 3)
+    # The reshaped tensors are views.  Removing the old names leaves their
+    # storage owned solely by Q/K/V and makes the intended lifetime explicit.
+    del query_out
+    del key_out
+    del value_out
+    # Original full-length QKV is no longer needed after merging.
+    del qkv
     output = F.scaled_dot_product_attention(query, key, value, dropout_p=attention.attn_drop.p if attention.training else 0.0)
-    output = attention.proj_drop(attention.proj(output.transpose(1, 2).reshape(batch, -1, channels)))
+    del query
+    del key
+    del value
+    output = output.transpose(1, 2).reshape(batch, -1, channels)
+    output = attention.proj(output)
+    output = attention.proj_drop(output)
     attention._fastvggt_reference_active_tokens = active_count
     return unmerge(output)
