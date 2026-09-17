@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 from copy import deepcopy
+import io
 import json
 import sys
 import time
@@ -101,7 +102,7 @@ def fastvggt_frame_indices(length: int, requested: int) -> np.ndarray:
 
 def scene_records(scene_dir: Path, requested: int, require_exact: bool = False,
                   fairness_fastvggt_protocol: bool = False, main_frame_stride: int = 3,
-                  min_source_frames: int = 301) -> tuple[list[dict[str, Any]], np.ndarray]:
+                  min_source_frames: int = 301) -> tuple[list[dict[str, Any]], np.ndarray, np.ndarray]:
     # The official downloaded ScanNet50 frames are flat (00001.jpg/.png/.txt).
     # The fallback preserves compatibility with the raw ScanNet layout.
     if (scene_dir / "color").is_dir():
@@ -112,6 +113,18 @@ def scene_records(scene_dir: Path, requested: int, require_exact: bool = False,
         images = numeric_paths(scene_dir, (".jpg", ".jpeg"))
         depths = numeric_paths(scene_dir, (".png",))
         poses = numeric_paths(scene_dir, (".txt",))
+    # FastVGGT's ``load_poses`` establishes its trajectory coordinate system
+    # using the first finite pose in the complete pose directory, before RGB /
+    # pose intersection and frame selection. Preserve that origin explicitly.
+    first_valid_pose = None
+    for frame_id in sorted(poses):
+        pose = np.loadtxt(poses[frame_id], dtype=np.float64)
+        if pose.shape == (4, 4) and np.isfinite(pose).all():
+            first_valid_pose = pose
+            break
+    if first_valid_pose is None:
+        raise RuntimeError(f"{scene_dir.name} has no finite camera poses")
+
     ids, matrices = [], []
     valid_ids = set(images) & set(poses)
     if depths and not fairness_fastvggt_protocol:
@@ -133,8 +146,10 @@ def scene_records(scene_dir: Path, requested: int, require_exact: bool = False,
             "Point --dataset-root to a full ScanNet RGB/pose extraction or lower --num-frames."
         )
     selected = fastvggt_frame_indices(len(ids), requested) if fairness_fastvggt_protocol else stride_frame_indices(len(ids), requested, main_frame_stride)
+    selected_c2w = np.stack(matrices, axis=0)[selected]
     records = [{"id": ids[i], "image": images[ids[i]], "depth": depths.get(ids[i])} for i in selected]
-    return records, np.stack(matrices, axis=0)[selected]
+    fastvggt_gt_c2w = np.linalg.inv(first_valid_pose) @ selected_c2w
+    return records, selected_c2w, fastvggt_gt_c2w
 
 
 def load_fastvggt_images(paths: list[Path], target_width: int = 518,
@@ -567,7 +582,7 @@ def pose_metrics(predicted_c2w: np.ndarray, gt_c2w_world: np.ndarray) -> tuple[d
     return values, aligned, gt
 
 
-def fastvggt_trajectory_metrics(predicted_c2w: np.ndarray, gt_c2w_world: np.ndarray,
+def fastvggt_trajectory_metrics(predicted_c2w: np.ndarray, fastvggt_gt_c2w: np.ndarray,
                                 frame_ids: list[int], exact_fastvggt: bool = False) -> dict[str, Any]:
     """Port FastVGGT's ScanNet ``eval_trajectory(..., align=True)`` protocol.
 
@@ -577,8 +592,7 @@ def fastvggt_trajectory_metrics(predicted_c2w: np.ndarray, gt_c2w_world: np.ndar
     than replacing them with dense indices.  The fairness path also preserves
     the released evaluator's ``align_origin=True`` argument exactly.
     """
-    gt_c2w = np.linalg.inv(gt_c2w_world[0]) @ gt_c2w_world
-    poses_est, poses_gt = np.linalg.inv(predicted_c2w), np.linalg.inv(gt_c2w)
+    poses_est, poses_gt = np.linalg.inv(predicted_c2w), np.linalg.inv(fastvggt_gt_c2w)
     timestamps = np.asarray(frame_ids, dtype=np.float64)
     trajectory_gt = PoseTrajectory3D(
         positions_xyz=poses_gt[:, :3, 3],
@@ -616,7 +630,7 @@ def fastvggt_trajectory_metrics(predicted_c2w: np.ndarray, gt_c2w_world: np.ndar
                          else "sim3_align_origin_compat")}
 
 
-def save_fastvggt_trajectory_visualization(predicted_c2w: np.ndarray, gt_c2w_world: np.ndarray,
+def save_fastvggt_trajectory_visualization(predicted_c2w: np.ndarray, fastvggt_gt_c2w: np.ndarray,
                                            frame_ids: list[int], output_path: Path) -> None:
     """Save FastVGGT's exact ``eval_trajectory(..., align=True)`` XZ plot."""
     import matplotlib
@@ -624,8 +638,7 @@ def save_fastvggt_trajectory_visualization(predicted_c2w: np.ndarray, gt_c2w_wor
     import matplotlib.pyplot as plt
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    gt_c2w = np.linalg.inv(gt_c2w_world[0]) @ gt_c2w_world
-    poses_est, poses_gt = np.linalg.inv(predicted_c2w), np.linalg.inv(gt_c2w)
+    poses_est, poses_gt = np.linalg.inv(predicted_c2w), np.linalg.inv(fastvggt_gt_c2w)
     timestamps = np.asarray(frame_ids, dtype=np.float64)
     trajectory_gt = PoseTrajectory3D(
         positions_xyz=poses_gt[:, :3, 3],
@@ -657,8 +670,17 @@ def save_fastvggt_trajectory_visualization(predicted_c2w: np.ndarray, gt_c2w_wor
         min_map=ate_result.stats["min"], max_map=ate_result.stats["max"],
     )
     axis.legend()
-    figure.savefig(output_path, dpi=90)
+    # Preserve FastVGGT's rendering/serialization boundary exactly: it renders
+    # the active pyplot figure to a PNG buffer, materializes it as PIL, then
+    # saves that PIL image to disk in ``evaluate_scene_and_save``.
+    buffer = io.BytesIO()
+    plt.savefig(buffer, format="png", dpi=90)
+    buffer.seek(0)
+    trajectory_image = Image.open(buffer)
+    trajectory_image.load()
+    buffer.close()
     plt.close(figure)
+    trajectory_image.save(output_path)
 
 
 def token_retention(model: VGGT, method: str) -> dict[str, Any]:
@@ -684,7 +706,8 @@ def numeric_mean(items: list[dict[str, Any]]) -> dict[str, float]:
             for key in keys if any(isinstance(item.get(key), (float, int, np.number)) for item in items)}
 
 
-def evaluate_scene(model: VGGT, scene: str, records: list[dict[str, Any]], gt_c2w: np.ndarray, gt_root: Path,
+def evaluate_scene(model: VGGT, scene: str, records: list[dict[str, Any]], gt_c2w: np.ndarray,
+                   fastvggt_gt_c2w: np.ndarray, gt_root: Path,
                    args: argparse.Namespace, device: torch.device) -> dict[str, Any]:
     images = load_fastvggt_images(
         [record["image"] for record in records], fairness_fastvggt_protocol=args.fairness_fastvggt_protocol
@@ -715,7 +738,7 @@ def evaluate_scene(model: VGGT, scene: str, records: list[dict[str, Any]], gt_c2
     )
     pose, _, _ = pose_metrics(pred_c2w, gt_c2w)
     fast_pose = fastvggt_trajectory_metrics(
-        pred_c2w, gt_c2w, [item["id"] for item in records], exact_fastvggt=args.fairness_fastvggt_protocol
+        pred_c2w, fastvggt_gt_c2w, [item["id"] for item in records], exact_fastvggt=args.fairness_fastvggt_protocol
     )
     depth_result = depth_metrics(depth, records)
     visualization = None
@@ -726,7 +749,7 @@ def evaluate_scene(model: VGGT, scene: str, records: list[dict[str, Any]], gt_c2
         )
         save_reconstruction_visualization(visualization_pred, visualization_gt, visualization_dir)
         save_fastvggt_trajectory_visualization(
-            pred_c2w, gt_c2w, [item["id"] for item in records], visualization_dir / "trajectory_xz.png"
+            pred_c2w, fastvggt_gt_c2w, [item["id"] for item in records], visualization_dir / "trajectory_xz.png"
         )
         visualization = {
             "reconstruction_overlay_ply": str(visualization_dir / "reconstruction_overlay.ply"),
@@ -843,12 +866,12 @@ def main() -> None:
             )
         print(f"[{number}/{len(scenes)}] {scene}: evaluating", flush=True)
         try:
-            records, gt_c2w = scene_records(
+            records, gt_c2w, fastvggt_gt_c2w = scene_records(
                 frames_root / scene, args.num_frames, args.require_exact_frames,
                 fairness_fastvggt_protocol=args.fairness_fastvggt_protocol,
                 main_frame_stride=args.main_frame_stride, min_source_frames=args.min_source_frames,
             )
-            result = evaluate_scene(model, scene, records, gt_c2w, gt_root, args, device)
+            result = evaluate_scene(model, scene, records, gt_c2w, fastvggt_gt_c2w, gt_root, args, device)
             write_json(scene_output, result)
             # A resumed experiment may replace an earlier failed attempt.
             # Keep the per-scene status unambiguous for the final merger.

@@ -118,5 +118,7 @@ With `--save-visualizations` (enabled by all three launcher scripts), each
 scene also receives `visualization/reconstruction_overlay.ply`, separate
 predicted/GT PLYs, `reconstruction.png`, and `trajectory_xz.png`. The
 trajectory image uses FastVGGT's original `eval_trajectory(..., align=True)`
-route: world-to-camera poses, the same Sim(3) alignment, EVO XZ plotting, GT
-dashed trace, and aligned APE colour map.
+route: the first finite pose in the complete pose sequence as origin,
+world-to-camera poses, the same Sim(3) alignment, EVO XZ plotting, GT dashed
+trace, aligned APE colour map, and the same matplotlib-buffer/PIL PNG save
+chain.
