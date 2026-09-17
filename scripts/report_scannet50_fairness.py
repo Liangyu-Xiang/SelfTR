@@ -8,6 +8,7 @@ always the DenseVGGT mean measured under the same frame-count/protocol.
 from __future__ import annotations
 
 import argparse
+import csv
 import json
 from pathlib import Path
 from typing import Any
@@ -17,6 +18,10 @@ import numpy as np
 
 METHODS = ("densevggt", "fastvggt", "selftr")
 PROTOCOL_ID = "fastvggt_fairness_v3"
+TABLE_COLUMNS = (
+    "Frames", "Method", "AUC@3", "AUC@30", "Acc", "Comp", "NC", "CD", "Latency (s)",
+    "FPS", "VRAM (GiB)", "Retention", "Spd.",
+)
 
 
 def read_metric(payload: dict[str, Any], section: str, key: str) -> float | None:
@@ -73,6 +78,25 @@ def display_retention(value: dict[str, Any]) -> str:
     return display(value["mean_percent"], 1) + "%"
 
 
+def table_row(row: dict[str, Any]) -> dict[str, str | int]:
+    """Use exactly the paper-table values in Markdown and spreadsheet output."""
+    return {
+        "Frames": row["frames"],
+        "Method": row["method"],
+        "AUC@3": display(row["AUC@3 (%)"]),
+        "AUC@30": display(row["AUC@30 (%)"]),
+        "Acc": display(row["Acc (m)"]),
+        "Comp": display(row["Comp (m)"]),
+        "NC": display(row["NC"]),
+        "CD": display(row["CD (m)"]),
+        "Latency (s)": display(row["Latency (s)"]),
+        "FPS": display(row["FPS"]),
+        "VRAM (GiB)": display(row["Peak VRAM allocated (GiB)"]),
+        "Retention": display_retention(row["Token retention"]),
+        "Spd.": display(row["Spd. (x)"]),
+    }
+
+
 def validate_summary(payload: dict[str, Any], path: Path, method: str, frames: int) -> None:
     if payload.get("method") != method or payload.get("num_frames_requested") != frames:
         raise RuntimeError(f"stale summary at {path}: expected {method}, {frames} frames")
@@ -112,22 +136,23 @@ def main() -> None:
         "rows": all_rows,
     }, indent=2, sort_keys=True) + "\n")
 
-    columns = ("Frames", "Method", "AUC@3", "AUC@30", "Acc", "Comp", "NC", "CD", "Latency (s)",
-               "FPS", "VRAM (GiB)", "Retention", "Spd.")
     markdown = ["# ScanNet50 FastVGGT fairness report", "",
                 "Reconstruction columns use `mean_fastvggt_reconstruction`; `Spd.` is DenseVGGT mean latency divided by the method mean latency at the same frame count.",
-                "", "| " + " | ".join(columns) + " |",
-                "|" + "|".join(["---"] * len(columns)) + "|"]
+                "", "| " + " | ".join(TABLE_COLUMNS) + " |",
+                "|" + "|".join(["---"] * len(TABLE_COLUMNS)) + "|"]
     for row in all_rows:
-        markdown.append("| " + " | ".join((
-            str(row["frames"]), row["method"], display(row["AUC@3 (%)"]), display(row["AUC@30 (%)"]),
-            display(row["Acc (m)"]), display(row["Comp (m)"]), display(row["NC"]), display(row["CD (m)"]),
-            display(row["Latency (s)"]), display(row["FPS"]), display(row["Peak VRAM allocated (GiB)"]),
-            display_retention(row["Token retention"]), display(row["Spd. (x)"]),
-        )) + " |")
+        values = table_row(row)
+        markdown.append("| " + " | ".join(str(values[column]) for column in TABLE_COLUMNS) + " |")
     markdown_path = args.output_root / "fairness_paper_report.md"
     markdown_path.write_text("\n".join(markdown) + "\n")
-    print(json.dumps({"json": str(json_path), "markdown": str(markdown_path), "rows": len(all_rows)}))
+    csv_path = args.output_root / "fairness_paper_report.csv"
+    # UTF-8 BOM makes Chinese Windows spreadsheet applications recognize the
+    # file without an import dialog; all metrics retain the Markdown precision.
+    with csv_path.open("w", newline="", encoding="utf-8-sig") as handle:
+        writer = csv.DictWriter(handle, fieldnames=TABLE_COLUMNS, lineterminator="\n")
+        writer.writeheader()
+        writer.writerows(table_row(row) for row in all_rows)
+    print(json.dumps({"json": str(json_path), "markdown": str(markdown_path), "csv": str(csv_path), "rows": len(all_rows)}))
 
 
 if __name__ == "__main__":

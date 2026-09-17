@@ -1,6 +1,6 @@
 """Regression coverage for paper-table field names."""
 
-from scripts.report_scannet50_fairness import method_row
+from scripts.report_scannet50_fairness import method_row, table_row
 
 
 def test_paper_report_reads_fastvggt_normal_consistency_from_nc():
@@ -16,3 +16,4 @@ def test_paper_report_reads_fastvggt_normal_consistency_from_nc():
     row = method_row(payload, "densevggt", 100, dense_latency=2.0)
 
     assert row["NC"] == 0.75
+    assert table_row(row)["NC"] == "0.750"

@@ -142,9 +142,10 @@ The project publication layout intentionally
 removes FastVGGT's ATE/ARE title and makes the colorbar exactly the same height
 as the plotting axes.
 
-After a complete fairness run, `fairness_paper_report.md` and
-`fairness_paper_report.json` are written at the output root.  Their Acc/Comp/
-NC/CD columns intentionally use `mean_fastvggt_reconstruction` (the released
+After a complete fairness run, `fairness_paper_report.md`,
+`fairness_paper_report.csv`, and `fairness_paper_report.json` are written at
+the output root.  The CSV contains the same human-readable paper-table values
+and opens directly in spreadsheet applications. Their Acc/Comp/NC/CD columns intentionally use `mean_fastvggt_reconstruction` (the released
 FastVGGT cloud pipeline), and `Spd.` is the DenseVGGT mean latency divided by
 the corresponding method's mean latency at the same frame count.  Fixed
 methods report one token-retention value; SelfTR reports its three stage values.
