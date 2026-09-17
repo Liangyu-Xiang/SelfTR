@@ -570,11 +570,17 @@ def fastvggt_reference_attention(
     query_in = query.permute(0, 2, 1, 3).reshape(batch, token_count, channels)
     key_in = key.permute(0, 2, 1, 3).reshape(batch, token_count, channels)
     value_in = value.permute(0, 2, 1, 3).reshape(batch, token_count, channels)
-    query_out, key_out, value_out = merge(query_in, mode="mean", extra_tensors=key_in, extra_tensors_2=value_in)
-    # These three full-length contiguous layouts are only merge inputs.  The
-    # released FastVGGT attention discards them before running SDPA.
+    # The reference helper accepts Q/K/V together, but its implementation
+    # retains the Q source/destination split while materializing K and V
+    # splits.  At ScanNet-500/1000 this adds multiple full source tensors to
+    # the peak.  The merge map is fixed, so processing the three independent
+    # tensors sequentially is algebraically (and numerically) identical while
+    # allowing each split to die before the next one is allocated.
+    query_out = merge(query_in, mode="mean")
     del query_in
+    key_out = merge(key_in, mode="mean")
     del key_in
+    value_out = merge(value_in, mode="mean")
     del value_in
     query = query_out.reshape(batch, -1, attention.num_heads, attention.head_dim).permute(0, 2, 1, 3)
     key = key_out.reshape(batch, -1, attention.num_heads, attention.head_dim).permute(0, 2, 1, 3)
