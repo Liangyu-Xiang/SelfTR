@@ -10,6 +10,16 @@ from typing import Any
 import numpy as np
 
 
+def compatible_frame_count(item: dict[str, Any], requested: int) -> bool:
+    """Accept legacy full-length results and new short-sequence results."""
+    actual = item.get("frames")
+    recorded_requested = item.get("requested_frames", actual)
+    frame_ids = item.get("frame_ids")
+    return (isinstance(actual, int) and 1 <= actual <= requested
+            and recorded_requested == requested
+            and isinstance(frame_ids, list) and len(frame_ids) == actual)
+
+
 def numeric_mean(items: list[dict[str, Any]]) -> dict[str, float]:
     keys = set().union(*(item.keys() for item in items))
     return {key: float(np.mean([item[key] for item in items if isinstance(item.get(key), (float, int, np.number))]))
@@ -53,15 +63,18 @@ def main() -> None:
     if args.fairness_fastvggt_protocol:
         invalid = [item.get("scene") for item in scenes
                    if item.get("protocol_id") != "fastvggt_fairness_v3"
-                   or item.get("method") != args.method or item.get("frames") != args.num_frames]
+                   or item.get("method") != args.method or not compatible_frame_count(item, args.num_frames)]
         if invalid:
             raise RuntimeError(f"fairness summary contains stale/incompatible results, e.g. {invalid[:3]}")
+    actual_frame_counts = [item["frames"] for item in scenes]
     payload = {"method": args.method, "num_frames_requested": args.num_frames,
                "protocol": {"experiment_kind": "fairness" if args.fairness_fastvggt_protocol else "main",
                             "sampler": ("released FastVGGT RGB/pose integer-stride selection" if args.fairness_fastvggt_protocol
                                         else "project stride-3 RGB/pose/depth selection")},
                "scene_count": len(scenes),
                "failed_scene_count": len(failures), "scenes": scenes, "failures": failures,
+               "effective_frame_counts": {"min": min(actual_frame_counts), "max": max(actual_frame_counts),
+                                          "short_scene_count": sum(count < args.num_frames for count in actual_frame_counts)},
                "mean_pose": numeric_mean([item["pose"] for item in scenes]),
                "mean_fastvggt_pose": numeric_mean([item["fastvggt_pose"] for item in scenes]),
                "mean_reconstruction": numeric_mean([item["reconstruction"] for item in scenes]),

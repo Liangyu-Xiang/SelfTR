@@ -21,6 +21,11 @@ It passes `--fairness-fastvggt-protocol` to every method.  That switch uses
 the released FastVGGT frame selector exactly: retain the first valid RGB/pose
 frame, integer-stride sample the remaining valid RGB/pose frames, then truncate
 at the requested count.  It intentionally does not alter the main protocol.
+When a sequence has fewer valid RGB/pose frames than the requested count, the
+fairness runner evaluates every available valid frame instead of failing. Each
+per-scene result records both `requested_frames` and the actual `frames`; the
+summary reports the minimum/maximum effective frame count and short-scene
+count. Existing full-length results remain resume-compatible.
 Its RGB preprocessing also follows FastVGGT: resize to width 518 with the
 height rounded to a multiple of 14, then centre-crop vertically to 518 px when
 the resized image is taller.  In this mode the FastVGGT baseline also uses the released protected bipartite

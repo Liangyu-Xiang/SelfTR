@@ -46,7 +46,7 @@ run_worker() {
     for method in "${METHODS[@]}"; do
       CUDA_VISIBLE_DEVICES=$gpu "$PYTHON_BIN" scripts/eval_scannet50.py \
         --method "$method" --checkpoint "$CHECKPOINT" --dataset-root "$DATA_ROOT" --gt-root "$GT_ROOT" \
-        --num-frames "$frames" --require-exact-frames --scenes "${selected[@]}" --skip-summary --resume \
+        --num-frames "$frames" --scenes "${selected[@]}" --skip-summary --resume \
         --fairness-fastvggt-protocol --save-visualizations --visualization-scenes "${VISUALIZATION_SCENES[@]}" \
         --device cuda:0 --output-dir "$OUTPUT_ROOT/${method}_${frames}"
     done

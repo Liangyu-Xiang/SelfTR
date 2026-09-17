@@ -23,13 +23,13 @@ def released_build_frame_selection(length: int, requested: int) -> np.ndarray:
     return np.asarray([first, *remaining[::stride]][:requested], dtype=np.int64)
 
 
-@pytest.mark.parametrize("length,requested", ((350, 100), (700, 300), (1200, 500), (2500, 1000)))
+@pytest.mark.parametrize("length,requested", ((350, 100), (700, 300), (1200, 500), (2500, 1000), (350, 1000)))
 def test_fairness_sampler_matches_released_fastvggt(length: int, requested: int):
     actual = fastvggt_frame_indices(length, requested)
     expected = released_build_frame_selection(length, requested)
     np.testing.assert_array_equal(actual, expected)
     assert actual[0] == 0
-    assert len(actual) == requested
+    assert len(actual) == min(length, requested)
 
 
 def test_fairness_preprocessing_applies_fastvggt_center_crop(tmp_path: Path):

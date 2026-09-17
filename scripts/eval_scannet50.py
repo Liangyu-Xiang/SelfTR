@@ -145,7 +145,7 @@ def scene_records(scene_dir: Path, requested: int, require_exact: bool = False,
     if require_exact and len(candidates) < requested:
         raise RuntimeError(
             f"{scene_dir.name} has {len(candidates)} selectable frames after the active sampling rule, but {requested} are required. "
-            "Point --dataset-root to a full ScanNet RGB/pose extraction or lower --num-frames."
+            "Omit --require-exact-frames to evaluate all available frames, or lower --num-frames."
         )
     selected = fastvggt_frame_indices(len(ids), requested) if fairness_fastvggt_protocol else stride_frame_indices(len(ids), requested, main_frame_stride)
     selected_c2w = np.stack(matrices, axis=0)[selected]
@@ -874,7 +874,9 @@ def evaluate_scene(model: VGGT, scene: str, records: list[dict[str, Any]], gt_c2
             depth, confidence, pred_c2w, intrinsic, gt_c2w[0], images,
             args, scene, artifact_tag, visualization_dir,
         ))
-    result = {"scene": scene, "method": args.method, "frames": len(records), "frame_ids": [item["id"] for item in records],
+    result = {"scene": scene, "method": args.method, "frames": len(records),
+              "requested_frames": args.num_frames, "short_sequence": len(records) < args.num_frames,
+              "frame_ids": [item["id"] for item in records],
               "protocol_id": FAIRNESS_PROTOCOL_ID if args.fairness_fastvggt_protocol else "project_main_v1",
               "pose": pose, "fastvggt_pose": fast_pose,
               "reconstruction": geometry, "fastvggt_reconstruction": fastvggt_geometry, "depth": depth_result,
@@ -968,6 +970,7 @@ def main() -> None:
                             if args.fairness_fastvggt_protocol else
                             f"project stride: every {args.main_frame_stride}-th valid RGB/pose/depth frame, capped at N"),
                 "source_frame_pool": f"at least {args.min_source_frames} valid source frames required; 300-frame caches are rejected",
+                "short_sequence_policy": "use every available selected frame when a scene contains fewer frames than requested",
                 "image_preprocessing": ("FastVGGT ScanNet: width=518, aspect-preserving height rounded to a multiple of 14, "
                                         "then centred vertically cropped to 518px when taller" if args.fairness_fastvggt_protocol else
                                         "project ScanNet: width=518, aspect-preserving height rounded to a multiple of 14"),
@@ -990,13 +993,16 @@ def main() -> None:
             existing = json.loads(scene_output.read_text())
             expected_protocol = FAIRNESS_PROTOCOL_ID if args.fairness_fastvggt_protocol else "project_main_v1"
             existing_visualization = existing.get("visualization") or {}
+            existing_requested_frames = existing.get("requested_frames", existing.get("frames"))
             visualization_is_complete = (not save_visualization or (
                 existing_visualization.get("point_cloud_glb")
                 and Path(existing_visualization["point_cloud_glb"]).is_file()
             ))
             if (existing.get("protocol_id") == expected_protocol
                     and existing.get("method", args.method) == args.method
-                    and existing.get("frames") == args.num_frames
+                    and existing_requested_frames == args.num_frames
+                    and isinstance(existing.get("frames"), int)
+                    and 1 <= existing["frames"] <= args.num_frames
                     and visualization_is_complete):
                 results.append(existing)
                 print(f"[{number}/{len(scenes)}] {scene}: resumed", flush=True)
@@ -1026,8 +1032,12 @@ def main() -> None:
             failures.append(failure)
             write_json(args.output_dir / scene / "failure.json", failure)
             print(f"[{number}/{len(scenes)}] {scene}: FAILED: {exc}", flush=True)
+    actual_frame_counts = [item["frames"] for item in results]
     summary = {"method": args.method, "num_frames_requested": args.num_frames, "scene_count": len(results),
                "failed_scene_count": len(failures), "protocol": protocol, "scenes": results, "failures": failures,
+               "effective_frame_counts": {"min": min(actual_frame_counts) if actual_frame_counts else None,
+                                          "max": max(actual_frame_counts) if actual_frame_counts else None,
+                                          "short_scene_count": sum(count < args.num_frames for count in actual_frame_counts)},
                "mean_pose": numeric_mean([item["pose"] for item in results]),
                "mean_fastvggt_pose": numeric_mean([item["fastvggt_pose"] for item in results]),
                "mean_reconstruction": numeric_mean([item["reconstruction"] for item in results]),

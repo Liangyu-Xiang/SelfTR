@@ -17,6 +17,16 @@ SCANNET50_SCENES = {
 PROTOCOL_ID = "fastvggt_fairness_v3"
 
 
+def compatible_frame_count(item: dict, requested: int) -> bool:
+    """Accept an all-available short scene while retaining legacy full runs."""
+    actual = item.get("frames")
+    recorded_requested = item.get("requested_frames", actual)
+    frame_ids = item.get("frame_ids")
+    return (isinstance(actual, int) and 1 <= actual <= requested
+            and recorded_requested == requested
+            and isinstance(frame_ids, list) and len(frame_ids) == actual)
+
+
 def load_run(directory: Path, method: str, frames: int) -> dict[str, dict]:
     failures = list(directory.glob("scene*/failure.json"))
     metrics_paths = sorted(directory.glob("scene*/metrics.json"))
@@ -27,7 +37,8 @@ def load_run(directory: Path, method: str, frames: int) -> dict[str, dict]:
         missing, extra = sorted(SCANNET50_SCENES - set(items)), sorted(set(items) - SCANNET50_SCENES)
         raise RuntimeError(f"{directory}: expected exactly 50 ScanNet scenes; missing={missing[:3]}, extra={extra[:3]}")
     for scene, item in items.items():
-        if item.get("protocol_id") != PROTOCOL_ID or item.get("method") != method or item.get("frames") != frames:
+        if (item.get("protocol_id") != PROTOCOL_ID or item.get("method") != method
+                or not compatible_frame_count(item, frames)):
             raise RuntimeError(f"{directory}/{scene}: stale or incompatible per-scene result")
     return items
 
