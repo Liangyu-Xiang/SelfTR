@@ -48,7 +48,7 @@ def method_row(payload: dict[str, Any], method: str, frames: int, dense_latency:
         # FastVGGT cloud path, not the project's diagnostic reference path.
         "Acc (m)": read_metric(payload, "mean_fastvggt_reconstruction", "acc_m"),
         "Comp (m)": read_metric(payload, "mean_fastvggt_reconstruction", "comp_m"),
-        "NC": read_metric(payload, "mean_fastvggt_reconstruction", "normal_consistency"),
+        "NC": read_metric(payload, "mean_fastvggt_reconstruction", "nc"),
         "CD (m)": read_metric(payload, "mean_fastvggt_reconstruction", "cd_m"),
         "Latency (s)": latency,
         "FPS": read_metric(payload, "mean_efficiency", "fps"),
