@@ -39,6 +39,22 @@ It renders a live terminal progress bar over all expected scene jobs
 (`50 × methods × requested frame counts`), including elapsed time and ETA.
 Set `PROGRESS_INTERVAL=10` to update it every 10 seconds.
 
+To prioritize the two efficient methods on a subset of GPUs, select them with
+`FAIRNESS_METHODS` and retain the same output root. For example:
+
+```bash
+FAIRNESS_METHODS="fastvggt selftr" FRAME_COUNTS="500" \
+bash scripts/run_scannet50_fairness.sh /path/to/vggt.pt \
+  /path/to/scannet50_processed /path/to/scannet_meshes 3,4,5,6 \
+  outputs/scannet50_fairness_500
+```
+
+That invocation produces the two per-method 50-scene summaries and validates
+their frame IDs. Run the remaining DenseVGGT baseline with
+`FAIRNESS_METHODS="densevggt"` and the same output root; once all three
+summaries exist, the runner automatically performs the full three-way
+validation and writes the CSV/Markdown/JSON paper report.
+
 ### Optional automatic shutdown after a rented-server experiment
 
 The runner itself never shuts down a machine by default.  When running on a
