@@ -45,6 +45,27 @@ python scripts/infer.py --method selftr --checkpoint "$CHECKPOINT" \
   --output outputs/selftr_prediction.pt
 ~~~
 
+### Interactive point-cloud export
+
+Pass `--glb-output` to export the prediction as a coloured point cloud with
+the estimated camera frusta.  The result is a standard GLB asset, so it can
+be inspected locally in a GLB viewer or embedded in a web page with
+[`<model-viewer>`](https://modelviewer.dev/), matching the interactive
+presentation used for VGGT's qualitative results.
+
+~~~bash
+python scripts/infer.py --method selftr --checkpoint "$CHECKPOINT" \
+  --images frames/*.jpg \
+  --glb-output outputs/selftr_scene.glb \
+  --glb-confidence-percentile 50 --glb-max-points 1000000
+~~~
+
+The confidence percentile removes the least reliable reconstructed pixels;
+larger values give a cleaner but sparser scene.  Depth discontinuities are
+filtered by default to avoid foreground/background streaks.  Use
+`--glb-keep-depth-edges` to preserve them, `--glb-hide-cameras` to omit camera
+frusta, and `--glb-max-points 0` to keep every retained point.
+
 Use --input-mode crop for VGGT's official 518-pixel crop preprocessing, or
 --input-mode pad to preserve the full image in a padded 518-pixel square.
 Input ordering is preserved.

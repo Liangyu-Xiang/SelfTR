@@ -17,6 +17,7 @@ if str(REPO_ROOT) not in sys.path:
 
 from vggt.models import VGGT
 from vggt.utils.load_fn import load_and_preprocess_images
+from vggt.utils.pose_enc import pose_encoding_to_extri_intri
 
 
 SELFTR_DEFAULTS = {
@@ -41,6 +42,35 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--input-mode", choices=("crop", "pad"), default="crop")
     parser.add_argument("--merge-ratio", type=float, default=0.9)
     parser.add_argument("--output", type=Path, default=None)
+    parser.add_argument(
+        "--glb-output",
+        type=Path,
+        default=None,
+        metavar="SCENE.glb",
+        help="export a coloured point cloud and camera frusta as a GLB scene",
+    )
+    parser.add_argument(
+        "--glb-confidence-percentile",
+        type=float,
+        default=50.0,
+        help="discard this lowest percentile of point confidence before GLB export",
+    )
+    parser.add_argument(
+        "--glb-max-points",
+        type=int,
+        default=1_000_000,
+        help="maximum number of coloured points stored in the GLB (0 keeps all points)",
+    )
+    parser.add_argument(
+        "--glb-hide-cameras",
+        action="store_true",
+        help="do not include estimated camera frusta in the GLB",
+    )
+    parser.add_argument(
+        "--glb-keep-depth-edges",
+        action="store_true",
+        help="keep depth discontinuities; by default they are removed for a cleaner point cloud",
+    )
     return parser.parse_args()
 
 
@@ -98,6 +128,35 @@ def cpu_prediction(prediction: dict[str, object]) -> dict[str, object]:
     }
 
 
+def export_glb(prediction: dict[str, object], args: argparse.Namespace) -> None:
+    """Export a VGGT result in the same interactive format as the project page."""
+    if args.glb_output is None:
+        return
+    from visual_util import predictions_to_glb
+
+    if args.glb_output.suffix.lower() != ".glb":
+        raise ValueError("--glb-output must end in .glb")
+
+    images = prediction.get("images")
+    pose_encoding = prediction.get("pose_enc")
+    if not isinstance(images, torch.Tensor) or not isinstance(pose_encoding, torch.Tensor):
+        raise RuntimeError("GLB export requires images and pose_enc predictions")
+    extrinsic, _ = pose_encoding_to_extri_intri(pose_encoding, images.shape[-2:])
+
+    visualization_prediction = dict(prediction)
+    visualization_prediction["extrinsic"] = extrinsic
+    scene = predictions_to_glb(
+        visualization_prediction,
+        conf_thres=args.glb_confidence_percentile,
+        show_cam=not args.glb_hide_cameras,
+        max_points=args.glb_max_points,
+        filter_depth_edges=not args.glb_keep_depth_edges,
+    )
+    args.glb_output.parent.mkdir(parents=True, exist_ok=True)
+    scene.export(file_obj=str(args.glb_output))
+    print(f"glb_saved={args.glb_output}")
+
+
 def main() -> int:
     args = parse_args()
     model = load_model(args)
@@ -109,6 +168,7 @@ def main() -> int:
     for name, value in prediction.items():
         if isinstance(value, torch.Tensor):
             print(f"{name}: shape={tuple(value.shape)}, dtype={value.dtype}, device={value.device}")
+    export_glb(prediction, args)
     if args.output is not None:
         args.output.parent.mkdir(parents=True, exist_ok=True)
         torch.save(cpu_prediction(prediction), args.output)

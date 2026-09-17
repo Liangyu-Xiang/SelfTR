@@ -6,12 +6,16 @@
 
 import os
 
-import cv2
 import numpy as np
 import requests
 import trimesh
 from matplotlib import colormaps
 from scipy.spatial.transform import Rotation
+
+try:
+    import cv2
+except ImportError:  # Sky filtering is optional; GLB export itself does not need OpenCV.
+    cv2 = None
 
 
 def predictions_to_glb(
@@ -26,19 +30,55 @@ def predictions_to_glb(
     filter_depth_edges: bool = True,
     depth_edge_rtol: float = 0.03,
 ) -> trimesh.Scene:
-    """Convert VGGT-Omega camera/depth predictions to a GLB scene."""
+    """Convert VGGT predictions into a browser-viewable GLB scene.
+
+    Both the original VGGT family and VGGT-Omega can use this function.  The
+    original model directly predicts ``world_points`` and
+    ``world_points_conf``; Omega's demo historically supplied the equivalent
+    ``world_points_from_depth`` and ``depth_conf`` fields instead.
+
+    The returned :class:`trimesh.Scene` contains a coloured POINTS primitive
+    plus optional camera frusta.  This is the representation consumed by the
+    ``<model-viewer>`` component used on the official VGGT project page.
+    """
     if not isinstance(predictions, dict):
         raise ValueError("predictions must be a dictionary")
 
-    conf_thres = max(2.0, float(conf_thres))
+    conf_thres = float(conf_thres)
+    if not 0.0 <= conf_thres <= 100.0:
+        raise ValueError("conf_thres must be a percentile between 0 and 100")
+    if max_points < 0:
+        raise ValueError("max_points must be non-negative")
 
-    points = predictions["world_points_from_depth"]
-    conf = predictions["depth_conf"]
+    points = _prediction_array(predictions, "world_points", "world_points_from_depth")
+    conf = _prediction_array(predictions, "world_points_conf", "depth_conf")
+    images = _prediction_array(predictions, "images")
+    camera_matrices = _prediction_array(predictions, "extrinsic")
+
+    points = _remove_batch_dimension(points, expected_ndim=5, name="world points")
+    conf = _remove_batch_dimension(conf, expected_ndim=4, name="point confidence")
+    images = _remove_batch_dimension(images, expected_ndim=5, name="images")
+    camera_matrices = _remove_batch_dimension(camera_matrices, expected_ndim=4, name="extrinsic")
+    if points.shape[:-1] != conf.shape:
+        raise ValueError(f"Point/confidence shapes do not match: {points.shape} vs {conf.shape}")
+    image_height_width = _image_height_width(images)
+    if images.shape[0] != points.shape[0] or image_height_width != points.shape[1:3]:
+        raise ValueError(
+            "Images must have the same frame count and spatial size as the point map: "
+            f"images={images.shape}, points={points.shape}"
+        )
+    if camera_matrices.shape != (points.shape[0], 3, 4):
+        raise ValueError(
+            "extrinsic must have shape [frames, 3, 4] matching the point map, got "
+            f"{camera_matrices.shape}"
+        )
+
     if filter_depth_edges and "depth" in predictions:
+        depth = _remove_batch_dimension(_prediction_array(predictions, "depth"), expected_ndim=5, name="depth")
+        if depth.shape[:-1] != conf.shape:
+            raise ValueError(f"Depth/confidence shapes do not match: {depth.shape} vs {conf.shape}")
         conf = conf.copy()
-        conf[depth_edge(predictions["depth"][..., 0], rtol=depth_edge_rtol)] = 0.0
-    images = predictions["images"]
-    camera_matrices = predictions["extrinsic"]
+        conf[depth_edge(depth[..., 0], rtol=depth_edge_rtol)] = 0.0
 
     if mask_sky and target_dir is not None:
         conf = apply_sky_mask(conf, target_dir)
@@ -90,6 +130,38 @@ def predictions_to_glb(
             integrate_camera_into_scene(scene, camera_to_world, color, scene_scale)
 
     return apply_scene_alignment(scene, extrinsics)
+
+
+def _prediction_array(predictions: dict, *names: str) -> np.ndarray:
+    """Return the first available prediction as a NumPy array."""
+    for name in names:
+        if name in predictions:
+            value = predictions[name]
+            if hasattr(value, "detach"):
+                value = value.detach().cpu().numpy()
+            return np.asarray(value)
+    choices = " or ".join(repr(name) for name in names)
+    raise KeyError(f"Predictions must include {choices}")
+
+
+def _remove_batch_dimension(array: np.ndarray, expected_ndim: int, name: str) -> np.ndarray:
+    """Accept either a batched [1, ...] prediction or its per-scene form."""
+    if array.ndim == expected_ndim:
+        if array.shape[0] != 1:
+            raise ValueError(f"Only batch size 1 is supported for GLB export, got {name} shape {array.shape}")
+        array = array[0]
+    if array.ndim != expected_ndim - 1:
+        raise ValueError(f"Unexpected {name} shape {array.shape}")
+    return array
+
+
+def _image_height_width(images: np.ndarray) -> tuple[int, int]:
+    """Return image spatial dimensions for either [F, C, H, W] or [F, H, W, C]."""
+    if images.shape[1] == 3:
+        return tuple(images.shape[2:4])
+    if images.shape[-1] == 3:
+        return tuple(images.shape[1:3])
+    raise ValueError(f"Images must be RGB [F, C, H, W] or [F, H, W, C], got {images.shape}")
 
 
 def _images_to_rgb(images: np.ndarray) -> np.ndarray:
@@ -202,6 +274,8 @@ def compute_camera_faces(cone_shape: trimesh.Trimesh) -> np.ndarray:
 
 
 def apply_sky_mask(conf: np.ndarray, target_dir: str) -> np.ndarray:
+    if cv2 is None:
+        raise ImportError("Sky masking requires opencv-python; install the project's visualization dependencies.")
     image_dir = os.path.join(target_dir, "images")
     image_names = sorted(os.listdir(image_dir))
     height, width = conf.shape[-2:]
